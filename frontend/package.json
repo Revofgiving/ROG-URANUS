@@ -9,11 +9,13 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@next/swc-darwin-arm64": "^16.2.7",
-    "lightningcss-darwin-arm64": "^1.32.0",
     "next": "16.2.6",
     "react": "19.2.4",
     "react-dom": "19.2.4"
+  },
+  "optionalDependencies": {
+    "@next/swc-darwin-arm64": "^16.2.7",
+    "lightningcss-darwin-arm64": "^1.32.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
