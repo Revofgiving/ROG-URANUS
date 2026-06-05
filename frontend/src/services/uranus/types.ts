@@ -126,6 +126,30 @@ export interface PercorsoResponse {
   riepilogoPayout: { prossimoPayout: string };
 }
 
+export interface DonoPendente {
+  id: number;
+  wallet: string;
+  importo: number;
+  livello: number;
+  tipo_uscita: string;
+  status: string;
+  created_at: string;
+  expires_at: string;
+  giorni_rimanenti: number;
+}
+
+export interface Messaggio {
+  id: number;
+  recipient_wallet: string;
+  sender: string;
+  subject: string;
+  content: string;
+  type: string;
+  gift_id: number | null;
+  created_at: string;
+  read: boolean;
+}
+
 export interface UranusService {
   health: () => Promise<HealthResponse>;
   dona: (params: {
@@ -138,4 +162,8 @@ export interface UranusService {
   getPosizione: (wallet: string) => Promise<PosizioneResponse>;
   getFlussiEsterni: () => Promise<FlussiEsterniResponse>;
   getPercorso: (wallet: string) => Promise<{ success: boolean; percorso: PercorsoResponse }>;
+  getDoniPendenti: (wallet: string) => Promise<{ success: boolean; doni: DonoPendente[]; count: number }>;
+  accettaDono: (donoId: number, wallet: string) => Promise<{ success: boolean; donoId: number; importo: number }>;
+  getMessaggi: (wallet: string) => Promise<{ success: boolean; messaggi: Messaggio[]; nonLetti: number }>;
+  segnaLetti: (wallet: string, messageIds: number[]) => Promise<{ success: boolean }>;
 }

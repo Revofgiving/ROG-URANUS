@@ -1,12 +1,16 @@
 import type {
   DonoResponse,
+  DonoPendente,
   FlussiEsterniResponse,
   HealthResponse,
+  Messaggio,
   PercorsoResponse,
   PosizioneResponse,
   StatoSistema,
   UranusService,
 } from "./types";
+
+export type { DonoPendente, Messaggio };
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -62,27 +66,3 @@ export const apiUranusService: UranusService = {
     ),
 };
 
-// Tipi aggiuntivi
-export type DonoPendente = {
-  id: number;
-  wallet: string;
-  importo: number;
-  livello: number;
-  tipo_uscita: string;
-  status: string;
-  created_at: string;
-  expires_at: string;
-  giorni_rimanenti: number;
-};
-
-export type Messaggio = {
-  id: number;
-  recipient_wallet: string;
-  sender: string;
-  subject: string;
-  content: string;
-  type: string;
-  gift_id: number | null;
-  created_at: string;
-  read: boolean;
-};

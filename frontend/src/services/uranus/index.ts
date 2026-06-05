@@ -3,8 +3,10 @@ import { mockUranusService } from "./mock-service";
 
 export type {
   DonoResponse,
+  DonoPendente,
   FlussiEsterniResponse,
   HealthResponse,
+  Messaggio,
   PercorsoResponse,
   PosizioneResponse,
   StatoSistema,

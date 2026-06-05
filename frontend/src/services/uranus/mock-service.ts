@@ -147,4 +147,24 @@ export const mockUranusService: UranusService = {
       },
     };
   },
+
+  async getDoniPendenti(_wallet: string) {
+    await wait();
+    return { success: true, doni: [], count: 0 };
+  },
+
+  async accettaDono(donoId: number, _wallet: string) {
+    await wait();
+    return { success: true, donoId, importo: 0 };
+  },
+
+  async getMessaggi(_wallet: string) {
+    await wait();
+    return { success: true, messaggi: [], nonLetti: 0 };
+  },
+
+  async segnaLetti(_wallet: string, _messageIds: number[]) {
+    await wait();
+    return { success: true };
+  },
 };
