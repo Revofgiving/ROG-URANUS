@@ -40,19 +40,16 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  // Output standalone per Docker (immagine leggera ~100MB vs ~1GB)
-  output: 'standalone',
-  // Security headers su tutte le rotte
-  async headers() {
-    return [
-      {
-        source: '/(.*)',
-        headers: securityHeaders,
-      },
-    ];
-  },
-  // Disabilita x-powered-by (non rivelare tecnologia)
+  // Static export per Pinata/IPFS + ENS
+  output: 'export',
+  // Trailing slash per compatibilità IPFS (dashboard/ invece di dashboard)
+  trailingSlash: true,
+  // Disabilita x-powered-by
   poweredByHeader: false,
+  // Immagini: disabilita ottimizzazione server-side (non disponibile in export)
+  images: {
+    unoptimized: true,
+  },
 };
 
 export default nextConfig;

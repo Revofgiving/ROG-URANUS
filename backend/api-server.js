@@ -220,6 +220,19 @@ function checkAdmin(req, res) {
   return true;
 }
 
+// ── ADMIN LOGIN (per frontend statico su IPFS) ──
+app.post('/api/admin/auth', (req, res) => {
+  const { username, password } = req.body || {};
+  const validUser = process.env.ADMIN_USERNAME;
+  const validPass = process.env.ADMIN_PASSWORD;
+  if (!validUser || !validPass)
+    return res.status(503).json({ error: 'Admin auth non configurata' });
+  if (!safeCompare(username, validUser) || !safeCompare(password, validPass))
+    return res.status(401).json({ error: 'Credenziali non valide' });
+  const session = { username, loggedAt: new Date().toISOString(), token: require('crypto').randomUUID() };
+  res.json({ success: true, session });
+});
+
 app.post('/api/admin/blocca', async (req, res) => {
   if (!checkAdmin(req, res)) return;
   const { motivo } = req.body;
