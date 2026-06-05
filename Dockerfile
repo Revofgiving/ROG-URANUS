@@ -37,12 +37,12 @@ COPY --from=builder /app/public ./public
 
 # Next.js 16: bind su tutte le interfacce (richiesto in Docker)
 ENV HOSTNAME=0.0.0.0
-ENV PORT=3000
+ENV PORT=3001
 ENV NODE_ENV=production
 
-EXPOSE 3000
+EXPOSE 3001
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
-  CMD wget -q --spider http://127.0.0.1:3000/ || exit 1
+  CMD wget -q --spider http://127.0.0.1:3001/ || exit 1
 
 CMD ["node", "server.js"]
