@@ -24,6 +24,9 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# wget per healthcheck Coolify
+RUN apk add --no-cache wget
+
 LABEL maintainer="URANUS"
 LABEL description="Frontend URANUS — Next.js 16"
 
