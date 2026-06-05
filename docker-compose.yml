@@ -1,0 +1,86 @@
+version: '3.9'
+# ============================================================
+# SUPERURANO — Docker Compose per Coolify (produzione)
+# ============================================================
+# docker compose up -d     (avvia tutti i servizi)
+# docker compose down -v   (reset totale DB)
+#
+# NOTA: Su Coolify, le variabili ${VAR} vengono impostate
+# dal pannello Environment Variables di Coolify.
+# ============================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: urano_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-urano}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-urano_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-urano}
+    volumes:
+      - urano_db_data:/var/lib/postgresql/data
+      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U urano -d urano"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: urano_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-urano}:${POSTGRES_PASSWORD:-urano_dev}@postgres:5432/${POSTGRES_DB:-urano}
+      ACCOUNT_0_WALLET: "0x0000000000000000000000000000000000000001"
+      CASSA_ROG_WALLET: ${CASSA_ROG_WALLET}
+      URANO_FUND_WALLET: ${URANO_FUND_WALLET:-0x4f53c4277E2e738CDb71375253b3fE30BBca95ce}
+      ROG_URANUS_WALLET: ${ROG_URANUS_WALLET:-0x0000000000000000000000000000000000000003}
+      PHARAOH_WALLET: ${PHARAOH_WALLET:-${URANO_FUND_WALLET:-0x4f53c4277E2e738CDb71375253b3fE30BBca95ce}}
+      USDC_CONTRACT_ADDRESS: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+      XAUT_CONTRACT_ADDRESS: "0xF1815bd50389c46847f0Bda824eC8da914045D14"
+      POLYGON_RPC_URL: ${POLYGON_RPC_URL}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      BACKEND_URL: ${BACKEND_URL:-http://localhost:4000}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    ports: ["4000:4000"]
+    healthcheck:
+      test: ["CMD-SHELL","wget -qO- http://localhost:4000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: urano_frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+      NEXT_PUBLIC_USE_MOCKS: "false"
+      NEXT_PUBLIC_USDC_CONTRACT: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+      NEXT_PUBLIC_FUND_WALLET: ${URANO_FUND_WALLET:-0x4f53c4277E2e738CDb71375253b3fE30BBca95ce}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-superadmin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+    ports: ["3000:3000"]
+    healthcheck:
+      test: ["CMD-SHELL","wget -qO- http://localhost:3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  urano_db_data:
+    name: urano_db_data
