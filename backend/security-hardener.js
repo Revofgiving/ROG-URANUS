@@ -329,6 +329,12 @@ function middleware() {
       return next();
     }
 
+    // 0c. SKIP per endpoint GET pubblici del frontend (IPFS/ENS)
+    const SAFE_GET_PATHS = ['/api/health', '/api/rog-status/', '/api/stato', '/api/testimonianze', '/api/percorso/', '/api/account/'];
+    if (req.method === 'GET' && SAFE_GET_PATHS.some(p => path.startsWith(p))) {
+      return next();
+    }
+
     // 0. HONEYPOT — ban immediato (solo bot/scanner colpiscono questi path)
     if (isHoneypot(path)) {
       state.totalHoneypotHits++;
