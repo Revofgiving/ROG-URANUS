@@ -49,10 +49,13 @@ app.use(securityHardener.middleware());
 initSecurity(app);
 app.use(express.json({ limit: '10kb' }));
 
-// HTTPS redirect
+// HTTPS redirect (skip per health check e richieste interne/localhost)
 if (process.env.NODE_ENV === 'production') {
   app.use((req, res, next) => {
-    if (req.headers['x-forwarded-proto'] !== 'https') return res.redirect(301, 'https://' + req.headers.host + req.url);
+    if (req.path === '/api/health') return next();
+    const host = req.headers.host || '';
+    if (host.startsWith('localhost') || host.startsWith('127.0.0.1')) return next();
+    if (req.headers['x-forwarded-proto'] !== 'https') return res.redirect(301, 'https://' + host + req.url);
     next();
   });
 }
