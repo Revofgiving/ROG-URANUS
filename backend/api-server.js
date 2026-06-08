@@ -79,13 +79,72 @@ app.post('/api/inizializza', async (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── DONO (20 USDC → 2 posizioni) ──
+// ── DONO (20 USDC → 2 posizioni) — CODA ASINCRONA (1.000+ donazioni/min) ──
+const donationQueue = require('./donation-queue');
+
 app.post('/api/dona', async (req, res) => {
   const { wallet, txHash, numeroPosizioni, nome } = req.body;
   if (!wallet) return res.status(400).json({ error: 'wallet obbligatorio' });
   if (!txHash) return res.status(400).json({ error: 'txHash obbligatorio' });
-  try { res.json(await flow.processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome })); }
-  catch (err) { res.status(err.message.includes('non valido') ? 400 : 500).json({ error: err.message }); }
+  try {
+    // Accoda e ritorna subito — il worker processa in background
+    const queued = await donationQueue.enqueue({ wallet, txHash, numeroPosizioni, nome });
+    res.json({ success: true, ...queued });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Polling stato donazione (frontend chiama ogni 2s)
+app.get('/api/dona/status/:jobId', async (req, res) => {
+  try {
+    const status = await donationQueue.getStatus(req.params.jobId);
+    res.json({ success: true, ...status });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Statistiche coda (admin)
+app.get('/api/dona/queue-stats', (req, res) => {
+  res.json({ success: true, stats: donationQueue.getStats() });
+});
+
+// ── VERIFICA PREREQUISITI ROG (usato dal frontend prima del pagamento) ──
+const rogChecker = require('./rog-prerequisite-checker');
+app.get('/api/rog-status/:wallet', async (req, res) => {
+  const wallet = (req.params.wallet || '').toLowerCase();
+  if (!wallet || !/^0x[a-f0-9]{40}$/.test(wallet)) return res.status(400).json({ error: 'Wallet non valido' });
+  try {
+    const status = await rogChecker.checkAllPrerequisites(wallet);
+    res.json({ success: true, ...status });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── PROXY: Registra wallet nella community ROG (evita CORS) ──
+app.post('/api/rog/register-community', async (req, res) => {
+  const wallet = (req.body?.wallet || '').toLowerCase();
+  if (!wallet || !/^0x[a-f0-9]{40}$/.test(wallet)) return res.status(400).json({ error: 'Wallet non valido' });
+  try {
+    const result = await rogChecker.registerCommunityOnRog(wallet);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── PROXY: Registra donazione ROG (evita CORS) ──
+app.post('/api/rog/register-donation', async (req, res) => {
+  const { donationId, donor, amount, txHash } = req.body || {};
+  if (!donor || !txHash) return res.status(400).json({ error: 'donor e txHash obbligatori' });
+  try {
+    const result = await rogChecker.registerDonationOnRog({ donationId, donor, amount, txHash });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ── ACCOUNT ──
@@ -219,19 +278,6 @@ function checkAdmin(req, res) {
   }
   return true;
 }
-
-// ── ADMIN LOGIN (per frontend statico su IPFS) ──
-app.post('/api/admin/auth', (req, res) => {
-  const { username, password } = req.body || {};
-  const validUser = process.env.ADMIN_USERNAME;
-  const validPass = process.env.ADMIN_PASSWORD;
-  if (!validUser || !validPass)
-    return res.status(503).json({ error: 'Admin auth non configurata' });
-  if (!safeCompare(username, validUser) || !safeCompare(password, validPass))
-    return res.status(401).json({ error: 'Credenziali non valide' });
-  const session = { username, loggedAt: new Date().toISOString(), token: require('crypto').randomUUID() };
-  res.json({ success: true, session });
-});
 
 app.post('/api/admin/blocca', async (req, res) => {
   if (!checkAdmin(req, res)) return;
@@ -670,6 +716,8 @@ app.listen(PORT, async () => {
   console.log(`   20 USDC → Sole → Luna → Mercurio → Venere → Giove → Saturno → Nettuno → Uranus`);
   console.log(`   Percorso: L0(Sole)→L1(Luna)→L2(Mercurio)→L3(Venere)→L4(Giove)→L5(Saturno) → Nettuno(FIFO) → Uranus\n`);
   try { await db.initDatabase(); } catch (err) { console.error('❌ DB:', err.message); }
+  // Inizializza coda donazioni asincrona
+  try { await donationQueue.initQueueTable(); } catch (err) { console.error('❌ DonationQueue:', err.message); }
 });
 
 module.exports = app;

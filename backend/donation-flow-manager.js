@@ -27,6 +27,7 @@ const bridge          = require('./bridge-manager');
 const predisposizione = require('./predisposizione-manager');
 const chainRegistrar  = require('./chain-registrar');
 const goldConverter   = require('./gold-converter');
+const rogChecker      = require('./rog-prerequisite-checker');
 
 const FONDO_WALLET = process.env.URANO_FUND_WALLET || '0x0000000000000000000000000000000000000001';
 const CASSA_WALLET = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
@@ -80,33 +81,26 @@ async function inizializzaSistema() {
     faraoneWallet: FONDO_WALLET, faraoneTipo: 'FONDO', sacerdotiNecessari: 3
   });
 
-  // ── OPZIONE 1: FONDO SEED NETTUNO ────────────────────────────────
-  // 108 posizioni CASSA del Fondo A precaricano Nettuno al bootstrap.
-  // Garantisce che le prime posizioni reali possano uscire da subito.
-  const NETTUNO_SEED = 108;
-  const queue = require('./queue-manager');
-  console.log(`\n🌊 SEED NETTUNO: inserimento ${NETTUNO_SEED} posizioni CASSA bootstrap...`);
-  for (let i = 0; i < NETTUNO_SEED; i++) {
-    await queue.aggiungiPosizione({
-      wallet: FONDO_WALLET,
-      nome: `Fondo Seed Nettuno #${i + 1}`,
-      tipo: 'CASSA',
-    });
-  }
-  console.log(`   ✅ ${NETTUNO_SEED} posizioni seed Nettuno (CASSA Fondo A) inserite`);
+  // ── NETTUNO: parte VUOTO ────────────────────────────────────────
+  // Nettuno si riempie naturalmente tramite:
+  //   1. Bridge L3/L5: posizioni inserite ad ogni uscita da Venere/Saturno
+  //   2. Auto-fill da Sole: 1 HUMAN per ogni tavola L0 completata
+  //   3. Rientri perpetui: 6/18 rientri per ogni uscita Nettuno
+  // Nessun seed artificiale — nessun USDC non coperto.
+  console.log(`\n🌊 Nettuno: parte vuoto, si riempirà naturalmente da Bridge + Sole + Rientri`);
 
   const nuovoState = {
     inizializzato: true, turnoEntrata: 1, turnoSistemaUrano: 1,
     primaTavolaEntrata: primaTavola.numero,
     fondoWallet: FONDO_WALLET, cassaWallet: CASSA_WALLET,
-    nettunoSeed: NETTUNO_SEED
+    nettunoSeed: 0
   };
   await db.setState('sistema', nuovoState);
 
   console.log('✅ Sistema URANO inizializzato');
   console.log(`   Fondo (A): ${FONDO_WALLET}`);
   console.log(`   CASSA: ${CASSA_WALLET}`);
-  console.log(`   Nettuno seed: ${NETTUNO_SEED} posizioni CASSA pronte`);
+  console.log(`   Nettuno: vuoto (riempimento naturale)`);
   return nuovoState;
 }
 
@@ -198,6 +192,22 @@ async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome
 
   const w = wallet.toLowerCase();
   const nomeEff = (nome || '').trim() || `${w.substring(0, 8)}...`;
+
+  // ═══════════════════════════════════════════════════════════════
+  // GATE OBBLIGATORIO: Prerequisiti ROG
+  // L'utente DEVE essere iscritto alla community ROG E avere
+  // almeno una donazione ROG completata prima di entrare in URANUS.
+  // ═══════════════════════════════════════════════════════════════
+  if (!verifier.isDevSkip(txHash)) {
+    const rogStatus = await rogChecker.checkAllPrerequisites(w);
+    if (!rogStatus.canProceed) {
+      const motivi = [];
+      if (!rogStatus.communityRegistered) motivi.push('non iscritto alla community ROG');
+      if (!rogStatus.rogDonationDone) motivi.push('nessuna donazione ROG completata');
+      throw new Error(`Prerequisiti ROG non soddisfatti: ${motivi.join(', ')}. Completa prima il percorso ROG.`);
+    }
+    console.log(`   \u2705 Prerequisiti ROG verificati (community + ${rogStatus.rogPositions} posizioni ROG)`);
+  }
 
   // Wallet già partecipante?
   const accountEsistente = await db.getAccount(w);

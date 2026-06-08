@@ -95,8 +95,11 @@ async function verificaDonazione({ txHash, walletMittente, importoMinimo = 20 })
   if (!WALLET_REGEX.test(destinatario)) {
     throw new Error('URANO_FUND_WALLET non è un indirizzo Ethereum valido');
   }
-  if (!WALLET_REGEX.test(usdcAddress)) {
-    throw new Error('USDC_CONTRACT_ADDRESS non è un indirizzo Ethereum valido');
+  // Validazione indirizzi token accettati
+  for (const [key, token] of Object.entries(ACCEPTED_TOKENS)) {
+    if (!WALLET_REGEX.test(token.address)) {
+      throw new Error(`${key} contract address non è un indirizzo Ethereum valido: ${token.address}`);
+    }
   }
 
   // 1. Anti-replay: verifica che la tx non sia già stata usata

@@ -30,14 +30,14 @@ const crypto = require('crypto');
 const CONFIG = {
   REFRESH_INTERVAL_MS: 5 * 60 * 1000,  // 5 minuti — auto-refresh
   NONCE_ROTATION_MS: 5 * 60 * 1000,    // 5 minuti — ruota nonce
-  IP_BAN_THRESHOLD: 50,                 // richieste sospette prima di ban
-  IP_BAN_DURATION_MS: 30 * 60 * 1000,  // 30 minuti ban
+  IP_BAN_THRESHOLD: 500,                // era 50 — scalato ×10 per evento alto traffico
+  IP_BAN_DURATION_MS: 10 * 60 * 1000,  // era 30min — ridotto a 10min
   BRUTE_FORCE_WINDOW_MS: 60 * 1000,    // finestra 1 minuto
-  BRUTE_FORCE_MAX_ATTEMPTS: 10,         // max tentativi in finestra
-  BRUTE_FORCE_LOCKOUT_MS: 15 * 60 * 1000, // lockout 15 min
+  BRUTE_FORCE_MAX_ATTEMPTS: 100,        // era 10 — scalato ×10
+  BRUTE_FORCE_LOCKOUT_MS: 5 * 60 * 1000, // era 15min — ridotto a 5min
   DDOS_WINDOW_MS: 10 * 1000,           // finestra 10 secondi
-  DDOS_MAX_REQUESTS: 100,              // max req per IP in 10 sec
-  ANOMALY_SCORE_THRESHOLD: 80,         // score anomalia per trigger alert
+  DDOS_MAX_REQUESTS: 1000,             // era 100 — scalato ×10 per evento stasera
+  ANOMALY_SCORE_THRESHOLD: 95,         // era 80 — meno falsi positivi sotto carico
   MAX_PAYLOAD_SIZE: 50 * 1024,         // 50KB max payload
   MAX_URL_LENGTH: 2048,                // max URL length
   SUSPICIOUS_PATTERNS: [
@@ -316,10 +316,18 @@ function refresh() {
  * DEVE essere montato PRIMA di tutti gli altri middleware.
  * Uso: app.use(securityHardener.middleware());
  */
+// IP locali sempre trusted in sviluppo
+const TRUSTED_LOCAL_IPS = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
+
 function middleware() {
   return (req, res, next) => {
     const ip = getClientIP(req);
     const path = req.originalUrl || req.url || '';
+
+    // 0b. SKIP SICUREZZA PER LOCALHOST (sviluppo locale)
+    if (TRUSTED_LOCAL_IPS.includes(ip) || ip.startsWith('::ffff:127.')) {
+      return next();
+    }
 
     // 0. HONEYPOT — ban immediato (solo bot/scanner colpiscono questi path)
     if (isHoneypot(path)) {

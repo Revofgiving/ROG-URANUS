@@ -57,10 +57,10 @@ const helmetMiddleware = helmet({
 // 2. RATE LIMITING
 // ============================================================
 
-// Limite generale: 100 richieste ogni 15 minuti per IP
+// Limite generale: 2000 richieste ogni 15 minuti per IP (alto traffico evento)
 const generalLimiter = rateLimit({
   windowMs:          15 * 60 * 1000,  // 15 minuti
-  max:               100,
+  max:               2000,             // era 100 — scalato ×20 per evento stasera
   standardHeaders:   true,
   legacyHeaders:     false,
   message:           { success: false, error: 'Troppe richieste. Riprova tra qualche minuto.' },
@@ -70,10 +70,10 @@ const generalLimiter = rateLimit({
   }
 });
 
-// Limite stretto per le donazioni: 10 richieste ogni 5 minuti per IP
+// Limite donazioni: 100 richieste ogni 5 minuti per IP (alto traffico evento)
 const donationLimiter = rateLimit({
   windowMs:          5 * 60 * 1000,  // 5 minuti
-  max:               10,
+  max:               100,             // era 10 — scalato ×10 per evento stasera
   standardHeaders:   true,
   legacyHeaders:     false,
   message:           { success: false, error: 'Limite donazioni raggiunto. Riprova tra 5 minuti.' },
