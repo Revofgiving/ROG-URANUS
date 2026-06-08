@@ -43,7 +43,22 @@ const securityHardener = require('./security-hardener');
 const app  = express();
 const PORT = process.env.PORT || 4000;
 
-// 🛡️ Security Hardener — DEVE essere il PRIMO middleware
+// 🌐 CORS — DEVE essere PRIMA del security hardener
+// così anche le risposte di errore (429, 403) includono gli header CORS
+const CORS_ORIGINS = (process.env.CORS_ORIGIN || '*').split(',').map(s => s.trim());
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '';
+  const allowed = CORS_ORIGINS.includes('*') || CORS_ORIGINS.includes(origin);
+  if (allowed) {
+    res.setHeader('Access-Control-Allow-Origin', CORS_ORIGINS.includes('*') ? '*' : origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Admin-Key, Authorization');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
+// 🛡️ Security Hardener — dopo CORS
 app.use(securityHardener.middleware());
 
 initSecurity(app);
