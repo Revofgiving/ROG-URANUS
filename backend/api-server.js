@@ -297,6 +297,24 @@ function checkAdmin(req, res) {
   return true;
 }
 
+// ── ADMIN LOGIN (pannello admin) ──
+// Spostato dal frontend Next.js: il frontend gira come sito statico (Pinata/IPFS)
+// e non può leggere process.env a runtime. Le credenziali stanno qui sul server.
+app.post('/api/admin/auth', (req, res) => {
+  const username = (req.body?.username || '').trim();
+  const password = req.body?.password || '';
+  const expectedUser = (process.env.ADMIN_USERNAME || '').trim();
+  const expectedPass = process.env.ADMIN_PASSWORD || '';
+  if (!expectedUser || !expectedPass) {
+    return res.status(500).json({ success: false, error: 'Configurazione admin non presente sul server' });
+  }
+  const valid = safeCompare(username, expectedUser) && safeCompare(password, expectedPass);
+  if (!valid) {
+    return res.status(401).json({ success: false, error: 'Credenziali non valide' });
+  }
+  res.json({ success: true, session: { username: expectedUser, loggedAt: new Date().toISOString() } });
+});
+
 app.post('/api/admin/blocca', async (req, res) => {
   if (!checkAdmin(req, res)) return;
   const { motivo } = req.body;
@@ -515,6 +533,70 @@ app.get('/api/posizione/:wallet', async (req, res) => {
 
     res.json({ success: true, account, posizioni, uscite, rientri });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── UTENTI (lista per pannello admin) ──
+// Spostato dal frontend Next.js (route /api/utenti) verso il backend, perché il
+// frontend statico su Pinata non può eseguire route handler server-side.
+// Aggregazione efficiente: un solo JOIN accounts + posizioni invece di N+1 fetch.
+app.post('/api/utenti', async (req, res) => {
+  if (!checkAdmin(req, res)) return; // solo admin: richiede header X-Admin-Key === ADMIN_API_KEY
+  try {
+    const body = req.body || {};
+    const page = Math.max(1, Number(body.page || 1));
+    const perPage = 20;
+    const search = String(body.search || '').trim().toLowerCase();
+    const statusFilter = String(body.status || '').trim().toLowerCase();
+
+    const rows = await pg.queryMany(
+      `SELECT a.wallet, a.nome, a.status, a.tipo, a.created_at,
+              COUNT(p.id) AS positions_count
+       FROM accounts a
+       JOIN posizioni p ON p.wallet = a.wallet
+       WHERE a.tipo NOT IN ('FONDO', 'CASSA')
+       GROUP BY a.wallet, a.nome, a.status, a.tipo, a.created_at`
+    );
+
+    const normalizeStatus = (s) =>
+      ['ATTIVO', 'IN_CODA', 'REGISTRATO'].includes(String(s || '').toUpperCase())
+        ? 'active'
+        : 'inactive';
+
+    let users = rows.map((r) => {
+      const wallet = String(r.wallet || '').toLowerCase();
+      const positionsCount = Number(r.positions_count) || 0;
+      const name = (r.nome || '').trim() || `${wallet.slice(0, 6)}...${wallet.slice(-4)}`;
+      return {
+        id: 0,
+        name,
+        email: wallet,
+        registeredAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
+        positionsCount,
+        totalDonated: positionsCount * 20,
+        status: normalizeStatus(r.status),
+      };
+    });
+
+    if (search) {
+      users = users.filter(
+        (u) => u.name.toLowerCase().includes(search) || u.email.toLowerCase().includes(search)
+      );
+    }
+    if (statusFilter === 'active' || statusFilter === 'inactive') {
+      users = users.filter((u) => u.status === statusFilter);
+    }
+
+    users.sort((a, b) => Date.parse(b.registeredAt) - Date.parse(a.registeredAt));
+
+    const total = users.length;
+    const totalPages = Math.max(1, Math.ceil(total / perPage));
+    const start = (page - 1) * perPage;
+    const paged = users.slice(start, start + perPage).map((u, idx) => ({ ...u, id: start + idx + 1 }));
+
+    res.json({ users: paged, total, totalPages });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── FLUSSI ESTERNI (per admin frontend) ──
