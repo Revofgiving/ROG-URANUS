@@ -302,9 +302,9 @@ function checkAdmin(req, res) {
 // e non può leggere process.env a runtime. Le credenziali stanno qui sul server.
 app.post('/api/admin/auth', (req, res) => {
   const username = (req.body?.username || '').trim();
-  const password = req.body?.password || '';
+  const password = (req.body?.password || '').trim();
   const expectedUser = (process.env.ADMIN_USERNAME || '').trim();
-  const expectedPass = process.env.ADMIN_PASSWORD || '';
+  const expectedPass = (process.env.ADMIN_PASSWORD || '').trim();
   if (!expectedUser || !expectedPass) {
     return res.status(500).json({ success: false, error: 'Configurazione admin non presente sul server' });
   }
