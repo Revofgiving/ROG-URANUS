@@ -17,12 +17,8 @@ require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const ROG_BACKEND_URL = (process.env.ROG_BACKEND_URL || '').replace(/\/+$/, '');
 
-// Wallet ROG che riceve le donazioni SMALL (cassa ROG)
-const ROG_CASSA_WALLET = '0xd5bcc7acc9d6862c784807134c1f70c3e7f9f790';
-// USDC su Polygon Mainnet
-const USDC_CONTRACT   = '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359';
-// Blocco Polygon corrispondente all'8 giugno 2026 00:00 UTC (≈ 88.205.000)
-const BLOCK_8_GIUGNO  = '0x541E6C8';
+// Posizione minima ROG per accedere a URANUS (corrispondente all'8 giugno 2026)
+const POSIZIONE_MINIMA_ROG = 20488;
 
 // ════════════════════════════════════════════════════════════════════
 // HTTP HELPER
@@ -76,7 +72,7 @@ async function checkCommunityRegistration(wallet) {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// CHECK ROG DONATION (almeno 1 posizione)
+// CHECK ROG DONATION (almeno 1 posizione >= POSIZIONE_MINIMA_ROG)
 // ════════════════════════════════════════════════════════════════════
 
 async function checkRogDonation(wallet) {
@@ -94,12 +90,19 @@ async function checkRogDonation(wallet) {
   }
 
   const data = result.data || {};
-  const positions = data.positions || data.posizioni || [];
-  const totalPositions = data.totalPositions || data.totalePosizioniAttive || positions.length;
+  const positions = data.posizioni || data.positions || [];
+  const totalPositions = data.totalePosizioniAttive || data.totalPositions || positions.length;
+
+  // CHECK PRINCIPALE: almeno 1 posizione con numero >= POSIZIONE_MINIMA_ROG (8/6/2026)
+  const hasQualifyingPosition = positions.some(p => Number(p.posizione || 0) >= POSIZIONE_MINIMA_ROG);
+
+  console.log(`🔐 [ROG-Check] ${wallet}: ${totalPositions} posizioni totali, qualificante (>=${POSIZIONE_MINIMA_ROG}): ${hasQualifyingPosition ? '✅' : '❌'}`);
 
   return {
-    hasDonation: totalPositions > 0,
+    hasDonation: hasQualifyingPosition,
     totalPositions,
+    hasQualifyingPosition,
+    posizioneMinima: POSIZIONE_MINIMA_ROG,
   };
 }
 
@@ -196,42 +199,33 @@ async function checkAllPrerequisites(wallet) {
 
   console.log(`🔐 [ROG-Check] Verifica prerequisiti ROG per ${w}...`);
 
-  // Esegui le verifiche in parallelo:
-  // 1. Iscrizione community ROG (via ROG backend)
-  // 2. Donazione recente on-chain: >= 2 USDC verso ROG cassa DOPO l'8 giugno 2026
-  const [communityResult, onChainResult] = await Promise.all([
+  // Verifiche in parallelo:
+  // 1. Iscrizione community ROG
+  // 2. Almeno 1 posizione ROG con numero >= 20488 (dall'8 giugno 2026)
+  const [communityResult, donationResult] = await Promise.all([
     checkCommunityRegistration(w),
-    checkRecentRogDonationOnChain(w),
+    checkRogDonation(w),
   ]);
-
-  // Fallback: se Alchemy non risponde, usa il check vecchio (ROG backend positions)
-  let rogDonationDone = onChainResult.hasRecentDonation;
-  let donationSource = 'blockchain';
-  if (onChainResult.error) {
-    const legacyResult = await checkRogDonation(w);
-    rogDonationDone = legacyResult.hasDonation;
-    donationSource = 'rog-backend-fallback';
-    console.warn(`🔐 [ROG-Check] Fallback al check ROG-backend per ${w}: ${legacyResult.hasDonation ? '✅' : '❌'}`);
-  }
 
   const errors = [];
   if (!communityResult.registered) {
     errors.push(communityResult.error || 'Non iscritto alla community ROG');
   }
-  if (!rogDonationDone) {
-    errors.push('Nessuna donazione ROG >= 2 USDC dopo l\'8 giugno 2026');
+  if (!donationResult.hasDonation) {
+    errors.push(donationResult.error || `Nessuna posizione ROG >= ${POSIZIONE_MINIMA_ROG} (donazione dell'8 giugno 2026 o successiva)`);
   }
 
-  const canProceed = communityResult.registered && rogDonationDone;
+  const canProceed = communityResult.registered && donationResult.hasDonation;
 
-  console.log(`🔐 [ROG-Check] Community: ${communityResult.registered ? '✅' : '❌'} | Donazione (${donationSource}): ${rogDonationDone ? '✅' : '❌'} | Accesso: ${canProceed ? '✅ OK' : '❌ BLOCCATO'}`);
+  console.log(`🔐 [ROG-Check] Community: ${communityResult.registered ? '✅' : '❌'} | Posizione >= ${POSIZIONE_MINIMA_ROG}: ${donationResult.hasDonation ? '✅' : '❌'} | Accesso: ${canProceed ? '✅ OK' : '❌ BLOCCATO'}`);
 
   return {
     canProceed,
     communityRegistered: communityResult.registered,
-    rogDonationDone,
-    donationSource,
-    latestTx: onChainResult.latestTx || null,
+    rogDonationDone: donationResult.hasDonation,
+    rogPositions: donationResult.totalPositions || 0,
+    hasQualifyingPosition: donationResult.hasQualifyingPosition || false,
+    posizioneMinima: POSIZIONE_MINIMA_ROG,
     errors,
   };
 }
