@@ -342,10 +342,26 @@ CREATE TABLE IF NOT EXISTS hub_testimonianze (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS hub_eventi (
+  id               SERIAL PRIMARY KEY,
+  nome             TEXT NOT NULL,
+  data             VARCHAR(20),
+  ora              VARCHAR(10),
+  tipo             VARCHAR(20) DEFAULT 'online',
+  descrizione      TEXT DEFAULT '',
+  link             TEXT DEFAULT '',
+  location         TEXT DEFAULT '',
+  max_partecipanti INTEGER DEFAULT 100,
+  iscritti         INTEGER DEFAULT 0,
+  status           VARCHAR(20) DEFAULT 'upcoming',
+  created_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_hub_news_created       ON hub_news(created_at);
 CREATE INDEX IF NOT EXISTS idx_hub_risorse_categoria  ON hub_risorse(categoria);
 CREATE INDEX IF NOT EXISTS idx_hub_com_created        ON hub_comunicazioni(created_at);
 CREATE INDEX IF NOT EXISTS idx_hub_tes_status         ON hub_testimonianze(status);
+CREATE INDEX IF NOT EXISTS idx_hub_eventi_data        ON hub_eventi(data);
 `;
 
 let initialized = false;

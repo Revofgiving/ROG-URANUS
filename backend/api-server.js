@@ -953,6 +953,63 @@ app.get('/api/comunita', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── EVENTI (admin: GET / POST / DELETE / PATCH status) ──
+app.get('/api/eventi', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await db.initDatabase();
+    const rows = await pg.queryMany('SELECT * FROM hub_eventi ORDER BY data ASC, created_at DESC LIMIT 200');
+    const now = new Date().toISOString().slice(0, 10);
+    const events = rows.map(r => ({
+      id: Number(r.id),
+      name: r.nome,
+      date: r.data || '',
+      time: r.ora || '',
+      type: r.tipo || 'online',
+      description: r.descrizione || '',
+      link: r.link || '',
+      location: r.location || '',
+      maxParticipants: Number(r.max_partecipanti) || 100,
+      participantsCount: Number(r.iscritti) || 0,
+      status: r.status || ((r.data || '') < now ? 'past' : 'upcoming'),
+    }));
+    res.json({ success: true, events, count: events.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/eventi', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await db.initDatabase();
+    const { name, date, time, type, description, link, location, maxParticipants } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: 'name obbligatorio' });
+    const item = await pg.queryOne(
+      `INSERT INTO hub_eventi (nome, data, ora, tipo, descrizione, link, location, max_partecipanti)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [name.trim(), date || '', time || '', type || 'online',
+       description || '', link || '', location || '', Number(maxParticipants) || 100]
+    );
+    res.json({ success: true, event: { id: item.id, name: item.nome, date: item.data, status: item.status } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/eventi/:id', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await pg.queryOne('DELETE FROM hub_eventi WHERE id = $1', [Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/eventi/:id/status', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    const { status } = req.body;
+    await pg.queryOne("UPDATE hub_eventi SET status=$1 WHERE id=$2", [status, Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── TESTIMONIANZE (pubblico POST; admin GET / approva / rifiuta) ──
 app.get('/api/testimonianze', async (_, res) => {
   try {
