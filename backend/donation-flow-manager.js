@@ -226,7 +226,9 @@ async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome
   } else {
     const verifica = await verifier.verificaDonazione({ txHash, walletMittente: w, importoMinimo: rules.IMPORTI.COSTO_PER_PERSONA });
     importoTotale = verifica.importoEffettivo;
-    n = Math.max(1, Math.floor(importoTotale / rules.IMPORTI.COSTO_PER_PERSONA));
+    // Usa le coppie calcolate dal verificatore: USDC = importo/20, XAUT0 = (importo × prezzo oro USD)/20.
+    // NON ricalcolare da importoEffettivo (che per XAUT0 è in once d'oro, non in USD).
+    n = Math.max(1, Number(verifica.numeroPosizioni) || 1);
   }
 
   console.log(`\n🌀 DONO ${n} COPPIA${n > 1 ? 'E' : ''} — wallet: ${w} — ${importoTotale} USDC`);
