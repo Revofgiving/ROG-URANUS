@@ -157,9 +157,12 @@ async function posizionaSacerdoteInUrano(wallet, nome) {
   const entrati = Number(sacerdoti_entrati) || 0;
   console.log(`   Sacerdoti nel Blocco 1: ${entrati}/${turno.sacerdoti_necessari}`);
 
-  // 🔮 PREDISPOSIZIONE: calcola le posizioni future di questo sacerdote
+  // 🔮 PREDISPOSIZIONE: calcola le posizioni future di questo sacerdote.
+  // In transazione la avvolgiamo in un SAVEPOINT: se fallisce (best-effort),
+  // annulla solo questo passo senza compromettere l'intera transazione.
   try {
-    await predisposizione.calcolaPredisposizione(wallet, turno.numero_turno, entrati, turno.faraone_wallet);
+    const pgConn = require('./pg-connection-manager');
+    await pgConn.savepoint(() => predisposizione.calcolaPredisposizione(wallet, turno.numero_turno, entrati, turno.faraone_wallet));
   } catch (e) { console.log(`   ⚠️  Predisposizione non calcolata: ${e.message}`); }
 
   // Progressioni
@@ -192,6 +195,7 @@ async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome
 
   const w = wallet.toLowerCase();
   const nomeEff = (nome || '').trim() || `${w.substring(0, 8)}...`;
+  const pg = require('./pg-connection-manager');
 
   // ═══════════════════════════════════════════════════════════════
   // GATE OBBLIGATORIO: Prerequisiti ROG
@@ -227,32 +231,41 @@ async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome
 
   console.log(`\n🌀 DONO ${n} COPPIA${n > 1 ? 'E' : ''} — wallet: ${w} — ${importoTotale} USDC`);
 
-  let account = await db.getAccount(w);
-  if (!account) account = await db.createAccount({ wallet: w, nome: nomeEff, tipo: 'PRIMARIO' });
-  if (!account.ticket_number) account = await db.assignTicket(w);
-  console.log(`   🎟️  Ticket: ${account.ticket_number}`);
+  // ✍️ Scritture atomiche in transazione: account + ticket + posizioni + donazione.
+  // Se una qualsiasi operazione fallisce (es. tavola piena), si annulla TUTTO:
+  // niente account orfani, niente posizioni/tavole a metà.
+  const { account, posizioni } = await pg.transaction(async () => {
+    let account = await db.getAccount(w);
+    if (!account) account = await db.createAccount({ wallet: w, nome: nomeEff, tipo: 'PRIMARIO' });
+    if (!account.ticket_number) account = await db.assignTicket(w);
+    console.log(`   🎟️  Ticket: ${account.ticket_number}`);
 
-  const posizioni = [];
-  for (let i = 0; i < n; i++) {
-    // 1. Posizione CASSA (sistema) — PRIMA
-    const rCassa = await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
-    posizioni.push({ tipo: 'CASSA', ...rCassa });
-    console.log(`   ✅ [${i + 1}/${n}] CASSA → Tavola #${rCassa.tavolaNumero} casella ${rCassa.casella}/6`);
+    const posizioni = [];
+    for (let i = 0; i < n; i++) {
+      // 1. Posizione CASSA (sistema) — PRIMA
+      const rCassa = await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
+      posizioni.push({ tipo: 'CASSA', ...rCassa });
+      console.log(`   ✅ [${i + 1}/${n}] CASSA → Tavola #${rCassa.tavolaNumero} casella ${rCassa.casella}/6`);
 
-    // 2. Posizione HUMAN (utente) — DOPO
-    const rHuman = await posizionaDonatoreEntrata(w, nomeEff);
-    posizioni.push({ tipo: 'HUMAN', ...rHuman });
-    console.log(`   ✅ [${i + 1}/${n}] HUMAN → Tavola #${rHuman.tavolaNumero} casella ${rHuman.casella}/6`);
-  }
+      // 2. Posizione HUMAN (utente) — DOPO
+      const rHuman = await posizionaDonatoreEntrata(w, nomeEff);
+      posizioni.push({ tipo: 'HUMAN', ...rHuman });
+      console.log(`   ✅ [${i + 1}/${n}] HUMAN → Tavola #${rHuman.tavolaNumero} casella ${rHuman.casella}/6`);
+    }
 
+    if (!verifier.isDevSkip(txHash)) {
+      await db.createDonazione({
+        donorWallet: w, importo: importoTotale, txHash,
+        destinatarioWallet: FONDO_WALLET,
+        tavolaId: posizioni[0]?.tavolaId, livello: 0, turno: posizioni[0]?.turno
+      });
+    }
+
+    return { account, posizioni };
+  });
+
+  // ⛓️ Registro on-chain URANUS (fire-and-forget, FUORI dalla transazione DB)
   if (!verifier.isDevSkip(txHash)) {
-    await db.createDonazione({
-      donorWallet: w, importo: importoTotale, txHash,
-      destinatarioWallet: FONDO_WALLET,
-      tavolaId: posizioni[0]?.tavolaId, livello: 0, turno: posizioni[0]?.turno
-    });
-
-    // ⛓️ Registro on-chain URANUS (fire-and-forget, non blocca il flusso)
     chainRegistrar.registerDonation(w, importoTotale, txHash);
   }
 
