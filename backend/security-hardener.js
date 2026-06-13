@@ -157,13 +157,21 @@ function calculateAnomalyScore(req) {
   let score = 0;
   const ip = getClientIP(req);
 
-  // Suspicious patterns in URL or body
+  // Suspicious patterns: controlla URL e body separatamente.
+  // Il pattern wallet 0x... si applica SOLO al body (non all'URL, perché
+  // i path legittimi come /api/posizione/0x... contengono wallet validi).
   const urlStr = req.originalUrl || req.url || '';
   const bodyStr = JSON.stringify(req.body || {});
-  const combined = urlStr + bodyStr;
 
+  const WALLET_PATTERN = /(0x[0-9a-f]{40,})/i;
   for (const pattern of CONFIG.SUSPICIOUS_PATTERNS) {
-    if (pattern.test(combined)) score += 20;
+    const isWalletPattern = pattern.toString() === WALLET_PATTERN.toString();
+    if (isWalletPattern) {
+      // Controlla solo il body — i wallet nei path API sono legittimi
+      if (pattern.test(bodyStr)) score += 20;
+    } else {
+      if (pattern.test(urlStr + bodyStr)) score += 20;
+    }
   }
 
   // URL too long
@@ -329,8 +337,13 @@ function middleware() {
       return next();
     }
 
-    // 0c. SKIP per endpoint GET pubblici del frontend (IPFS/ENS)
-    const SAFE_GET_PATHS = ['/api/health', '/api/rog-status/', '/api/stato', '/api/testimonianze', '/api/percorso/', '/api/account/'];
+    // 0c. SKIP per endpoint GET pubblici del frontend (IPFS/ENS + dashboard utente)
+    const SAFE_GET_PATHS = [
+      '/api/health', '/api/rog-status/', '/api/stato', '/api/testimonianze',
+      '/api/percorso/', '/api/account/',
+      // Dashboard utente — chiamate frequenti (polling 30s), mai bloccare
+      '/api/posizione/', '/api/doni-pendenti/', '/api/messaggi/',
+    ];
     if (req.method === 'GET' && SAFE_GET_PATHS.some(p => path.startsWith(p))) {
       return next();
     }
