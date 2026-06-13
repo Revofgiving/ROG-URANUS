@@ -21,6 +21,11 @@ const results = new Map();  // jobId → risultato (in memoria, TTL 10 min)
 let processing = false;
 let totalProcessed = 0;
 let totalErrors = 0;
+// ── RETRY automatico su transazioni ancora in pending ──
+// Se al momento del processing la tx non e ancora confermata on-chain, NON falliamo
+// subito: ri-accodiamo il job e ritentiamo, perche la conferma puo arrivare dopo.
+const MAX_TX_ATTEMPTS = Number(process.env.DONA_TX_MAX_ATTEMPTS || 40); // ~3-4 min a 5s/tentativo
+const TX_RETRY_DELAY_MS = Number(process.env.DONA_TX_RETRY_MS || 5000);
 
 // ── INIT: crea tabella coda se non esiste ──
 
@@ -138,6 +143,7 @@ async function processNext() {
   processing = true;
   const job = queue[0]; // Peek (non rimuovere ancora)
   job.status = 'PROCESSING';
+  let requeue = false;
 
   try {
     // Lazy-load per evitare circular dependency
@@ -172,29 +178,62 @@ async function processNext() {
     console.log(`✅ [DonationQueue] Completato: ${job.id} ticket=${result.ticket || '?'} (processati: ${totalProcessed})`);
 
   } catch (err) {
-    // Errore
-    const failed = {
-      jobId: job.id,
-      status: 'FAILED',
-      error: err.message,
-      processedAt: new Date().toISOString(),
-    };
+    const isRetryable = !!(err && (err.retryable || err.code === 'TX_PENDING' || err.code === 'RPC_ERROR'
+      || /non trovata su Polygon|in pending|Impossibile contattare Polygon/i.test(err.message || '')));
+    job.attempts = (job.attempts || 0) + 1;
 
-    results.set(job.id, failed);
-    totalErrors++;
+    if (isRetryable && job.attempts < MAX_TX_ATTEMPTS) {
+      // Non definitivo: la tx e probabilmente ancora in pending → ri-accoda e ritenta.
+      requeue = true;
+      results.set(job.id, {
+        jobId: job.id,
+        status: 'PENDING_RETRY',
+        attempt: job.attempts,
+        maxAttempts: MAX_TX_ATTEMPTS,
+        error: err.message,
+      });
+      try {
+        await pg.query(
+          `UPDATE donation_queue SET status = 'PENDING_RETRY', result = $1 WHERE id = $2`,
+          [JSON.stringify({ attempt: job.attempts, error: err.message }), job.id]
+        );
+      } catch (_) {}
+      console.warn(`⏳ [DonationQueue] ${job.id} tx non ancora confermata — retry ${job.attempts}/${MAX_TX_ATTEMPTS} tra ${TX_RETRY_DELAY_MS}ms`);
+    } else {
+      // Errore definitivo (o tentativi esauriti).
+      const failed = {
+        jobId: job.id,
+        status: 'FAILED',
+        error: err.message,
+        attempts: job.attempts,
+        processedAt: new Date().toISOString(),
+      };
 
-    try {
-      await pg.query(
-        `UPDATE donation_queue SET status = 'FAILED', result = $1, processed_at = NOW() WHERE id = $2`,
-        [JSON.stringify({ error: err.message }), job.id]
-      );
-    } catch (_) {}
+      results.set(job.id, failed);
+      totalErrors++;
 
-    console.error(`❌ [DonationQueue] Errore: ${job.id} — ${err.message}`);
+      try {
+        await pg.query(
+          `UPDATE donation_queue SET status = 'FAILED', result = $1, processed_at = NOW() WHERE id = $2`,
+          [JSON.stringify({ error: err.message, attempts: job.attempts }), job.id]
+        );
+      } catch (_) {}
+
+      console.error(`❌ [DonationQueue] Errore: ${job.id} — ${err.message}`);
+    }
   }
 
   // Rimuovi dalla coda e processa il prossimo
   queue.shift();
+
+  // Se la tx era ancora in pending, ri-accoda il job in fondo dopo un breve ritardo.
+  if (requeue) {
+    setTimeout(() => {
+      job.status = 'QUEUED';
+      queue.push(job);
+      if (!processing) processNext();
+    }, TX_RETRY_DELAY_MS);
+  }
 
   // Pulizia risultati vecchi (>10 min) per non consumare memoria
   const now = Date.now();

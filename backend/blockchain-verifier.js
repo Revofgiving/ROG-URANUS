@@ -117,11 +117,19 @@ async function verificaDonazione({ txHash, walletMittente, importoMinimo = 20 })
   try {
     receipt = await prov.getTransactionReceipt(txHash);
   } catch (e) {
-    throw new Error(`Impossibile contattare Polygon: ${e.message}`);
+    // Errore transitorio di rete/RPC: la coda puo ritentare.
+    const err = new Error(`Impossibile contattare Polygon: ${e.message}`);
+    err.code = 'RPC_ERROR';
+    err.retryable = true;
+    throw err;
   }
 
   if (!receipt) {
-    throw new Error(`Transazione ${txHash} non trovata su Polygon (potrebbe essere in pending)`);
+    // Tx non ancora minata (pending) o non ancora propagata: ritentabile dalla coda.
+    const err = new Error(`Transazione ${txHash} non trovata su Polygon (potrebbe essere in pending)`);
+    err.code = 'TX_PENDING';
+    err.retryable = true;
+    throw err;
   }
 
   // 3. Verifica conferma
