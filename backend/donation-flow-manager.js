@@ -29,7 +29,11 @@ const chainRegistrar  = require('./chain-registrar');
 const goldConverter   = require('./gold-converter');
 const rogChecker      = require('./rog-prerequisite-checker');
 
-const FONDO_WALLET = process.env.URANO_FUND_WALLET || '0x0000000000000000000000000000000000000001';
+// Tesoreria on-chain: dove ARRIVANO e si registrano le donazioni (= destinatario verificato on-chain).
+const TREASURY_WALLET = process.env.URANO_FUND_WALLET || '0x0000000000000000000000000000000000000001';
+// FONDO "A": entita di GIOCO (erede della tavola #1, apre i turni). Puo essere un wallet SEPARATO dalla
+// tesoreria impostando la env FONDO_WALLET; se assente coincide con la tesoreria (comportamento storico).
+const FONDO_WALLET = process.env.FONDO_WALLET || TREASURY_WALLET;
 const CASSA_WALLET = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
 const FONDO_SIGLA = 'A';
 
@@ -258,7 +262,7 @@ async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome
     if (!verifier.isDevSkip(txHash)) {
       await db.createDonazione({
         donorWallet: w, importo: importoTotale, txHash,
-        destinatarioWallet: FONDO_WALLET,
+        destinatarioWallet: TREASURY_WALLET,
         tavolaId: posizioni[0]?.tavolaId, livello: 0, turno: posizioni[0]?.turno
       });
     }
