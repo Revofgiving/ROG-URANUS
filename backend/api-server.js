@@ -809,6 +809,191 @@ app.post('/api/cross/notifica', crossPlatform.crossPlatformAuth, async (req, res
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ══════════════════════════════════════════════════════════════════
+// HUB PUBBLICO — News, Risorse/Galleria, Comunicazioni, Testimonianze
+// ══════════════════════════════════════════════════════════════════
+
+// ── NEWS (pubblico: GET; admin: POST / DELETE) ──
+app.get('/api/news', async (_, res) => {
+  try {
+    await db.initDatabase();
+    const news = await pg.queryMany('SELECT * FROM hub_news ORDER BY created_at DESC LIMIT 100');
+    res.json({ success: true, news, count: news.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/news', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await db.initDatabase();
+    const { titolo, excerpt, categoria, badge, data } = req.body;
+    if (!titolo?.trim()) return res.status(400).json({ error: 'titolo obbligatorio' });
+    const item = await pg.queryOne(
+      `INSERT INTO hub_news (titolo, excerpt, categoria, badge, data) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [titolo.trim(), excerpt || '', categoria || 'aggiornamenti', badge || null,
+       data || new Date().toLocaleDateString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric' })]
+    );
+    res.json({ success: true, item });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/news/:id', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await pg.queryOne('DELETE FROM hub_news WHERE id = $1', [Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── RISORSE / GALLERIA (pubblico: GET; admin: POST / DELETE) ──
+app.get('/api/risorse', async (_, res) => {
+  try {
+    await db.initDatabase();
+    const risorse = await pg.queryMany('SELECT * FROM hub_risorse ORDER BY created_at DESC LIMIT 200');
+    res.json({ success: true, risorse, count: risorse.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/risorse', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await db.initDatabase();
+    const { nome, tipo, dimensione, categoria, data_item, url } = req.body;
+    if (!nome?.trim()) return res.status(400).json({ error: 'nome obbligatorio' });
+    const item = await pg.queryOne(
+      `INSERT INTO hub_risorse (nome, tipo, dimensione, categoria, data_item, url) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [nome.trim(), (tipo || 'PDF').toUpperCase(), dimensione || '', categoria || 'documenti',
+       data_item || new Date().toLocaleDateString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric' }), url || '']
+    );
+    res.json({ success: true, item });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/risorse/:id', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await pg.queryOne('DELETE FROM hub_risorse WHERE id = $1', [Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── COMUNICAZIONI HUB (pubblico: GET; admin: POST / DELETE) ──
+app.get('/api/comunicazioni', async (_, res) => {
+  try {
+    await db.initDatabase();
+    const items = await pg.queryMany('SELECT * FROM hub_comunicazioni ORDER BY created_at DESC LIMIT 100');
+    res.json({ success: true, comunicazioni: items, count: items.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/comunicazioni', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await db.initDatabase();
+    const { titolo, testo, categoria, tag, data } = req.body;
+    if (!titolo?.trim()) return res.status(400).json({ error: 'titolo obbligatorio' });
+    const item = await pg.queryOne(
+      `INSERT INTO hub_comunicazioni (titolo, testo, categoria, tag, data) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [titolo.trim(), testo || '', categoria || 'ufficiali', tag || 'Ufficiale',
+       data || new Date().toLocaleDateString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric' })]
+    );
+    res.json({ success: true, item });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/comunicazioni/:id', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await pg.queryOne('DELETE FROM hub_comunicazioni WHERE id = $1', [Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── COMUNITA (admin: lista membri con paginazione) ──
+app.get('/api/comunita', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await db.initDatabase();
+    const page = Math.max(1, Number(req.query.page || 1));
+    const perPage = 20;
+    const search = (req.query.search || '').trim().toLowerCase();
+    const statusFilter = (req.query.status || '').trim();
+
+    const rows = await pg.queryMany(`
+      SELECT a.wallet, a.nome, a.status, a.tipo, a.created_at, a.ticket_number,
+             COUNT(DISTINCT p.id) AS positions_count
+      FROM accounts a
+      LEFT JOIN posizioni p ON p.wallet = a.wallet
+      WHERE a.tipo NOT IN ('FONDO','CASSA')
+      GROUP BY a.wallet, a.nome, a.status, a.tipo, a.created_at, a.ticket_number
+      ORDER BY a.created_at DESC
+    `);
+
+    let members = rows.map((r) => ({
+      entryNumber: r.ticket_number || 0,
+      wallet: r.wallet,
+      livello: 'SOLE',
+      tipo: r.tipo || 'PRIMARIO',
+      joinedAt: r.created_at,
+      donations: Number(r.positions_count) || 0,
+      totalDonated: (Number(r.positions_count) || 0) * 20,
+      positions: Number(r.positions_count) || 0,
+      status: ['ATTIVO','IN_CODA','REGISTRATO'].includes((r.status||'').toUpperCase()) ? 'active' : 'inactive',
+    }));
+
+    if (search) members = members.filter(m => m.wallet.includes(search));
+    if (statusFilter === 'active' || statusFilter === 'inactive')
+      members = members.filter(m => m.status === statusFilter);
+
+    const total = members.length;
+    const totalPages = Math.max(1, Math.ceil(total / perPage));
+    const paged = members.slice((page - 1) * perPage, page * perPage);
+
+    res.json({ members: paged, total, totalPages });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── TESTIMONIANZE (pubblico POST; admin GET / approva / rifiuta) ──
+app.get('/api/testimonianze', async (_, res) => {
+  try {
+    await db.initDatabase();
+    const testimonianze = await pg.queryMany('SELECT * FROM hub_testimonianze ORDER BY created_at DESC LIMIT 100');
+    const pending  = testimonianze.filter(t => t.status === 'pending').length;
+    const approved = testimonianze.filter(t => t.status === 'approved').length;
+    res.json({ success: true, testimonianze, pending, approved });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/testimonianze', async (req, res) => {
+  try {
+    await db.initDatabase();
+    const { wallet, messaggio, livello } = req.body;
+    if (!wallet || !messaggio?.trim()) return res.status(400).json({ error: 'wallet e messaggio obbligatori' });
+    const item = await pg.queryOne(
+      `INSERT INTO hub_testimonianze (wallet, messaggio, livello, data) VALUES ($1,$2,$3,$4) RETURNING *`,
+      [wallet.toLowerCase(), messaggio.trim(), livello || 'SOLE',
+       new Date().toLocaleDateString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric' })]
+    );
+    res.json({ success: true, item });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/testimonianze/:id/approva', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await pg.queryOne("UPDATE hub_testimonianze SET status='approved' WHERE id=$1", [Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/testimonianze/:id/rifiuta', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    await pg.queryOne("UPDATE hub_testimonianze SET status='rejected' WHERE id=$1", [Number(req.params.id)]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── 404 ──
 app.use((_, res) => res.status(404).json({ success: false, error: 'Endpoint non trovato' }));
 

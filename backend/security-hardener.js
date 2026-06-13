@@ -343,6 +343,8 @@ function middleware() {
       '/api/percorso/', '/api/account/',
       // Dashboard utente — chiamate frequenti (polling 30s), mai bloccare
       '/api/posizione/', '/api/doni-pendenti/', '/api/messaggi/',
+      // Hub pubblico — news, galleria, comunicazioni, testimonianze
+      '/api/news', '/api/risorse', '/api/comunicazioni', '/api/testimonianze',
     ];
     if (req.method === 'GET' && SAFE_GET_PATHS.some(p => path.startsWith(p))) {
       return next();

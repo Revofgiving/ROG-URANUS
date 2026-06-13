@@ -296,6 +296,58 @@ CREATE INDEX IF NOT EXISTS idx_bridge_wallet       ON bridge_log(wallet);
 // INIZIALIZZAZIONE
 // ========================================
 
+// ========================================
+// SCHEMA HUB (news, risorse, comunicazioni, testimonianze)
+// ========================================
+
+const SCHEMA_HUB_SQL = `
+CREATE TABLE IF NOT EXISTS hub_news (
+  id         SERIAL PRIMARY KEY,
+  titolo     TEXT NOT NULL,
+  excerpt    TEXT DEFAULT '',
+  categoria  VARCHAR(50) DEFAULT 'aggiornamenti',
+  badge      VARCHAR(50),
+  data       VARCHAR(20),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS hub_risorse (
+  id         SERIAL PRIMARY KEY,
+  nome       TEXT NOT NULL,
+  tipo       VARCHAR(20) DEFAULT 'PDF',
+  dimensione VARCHAR(30) DEFAULT '',
+  categoria  VARCHAR(50) DEFAULT 'documenti',
+  data_item  VARCHAR(20),
+  url        TEXT DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS hub_comunicazioni (
+  id         SERIAL PRIMARY KEY,
+  titolo     TEXT NOT NULL,
+  testo      TEXT DEFAULT '',
+  categoria  VARCHAR(50) DEFAULT 'ufficiali',
+  tag        VARCHAR(50) DEFAULT 'Ufficiale',
+  data       VARCHAR(20),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS hub_testimonianze (
+  id         SERIAL PRIMARY KEY,
+  wallet     TEXT NOT NULL,
+  messaggio  TEXT NOT NULL,
+  livello    VARCHAR(30) DEFAULT 'SOLE',
+  status     VARCHAR(20) DEFAULT 'pending',
+  data       VARCHAR(20),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_hub_news_created       ON hub_news(created_at);
+CREATE INDEX IF NOT EXISTS idx_hub_risorse_categoria  ON hub_risorse(categoria);
+CREATE INDEX IF NOT EXISTS idx_hub_com_created        ON hub_comunicazioni(created_at);
+CREATE INDEX IF NOT EXISTS idx_hub_tes_status         ON hub_testimonianze(status);
+`;
+
 let initialized = false;
 
 async function initDatabase() {
@@ -308,6 +360,10 @@ console.log('🌀 Inizializzazione database SUPERURANO...');
   // Schema Nettuno (FIFO)
   await pg.query(SCHEMA_FIFO_SQL);
   console.log('\u2705 Tabelle Nettuno (FIFO) pronte');
+
+  // Schema Hub (news, risorse, comunicazioni, testimonianze)
+  await pg.query(SCHEMA_HUB_SQL);
+  console.log('\u2705 Tabelle Hub (news/risorse/comunicazioni) pronte');
 }
 
 // ========================================
