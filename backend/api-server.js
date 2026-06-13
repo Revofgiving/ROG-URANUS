@@ -513,11 +513,14 @@ app.get('/api/posizione/:wallet', async (req, res) => {
     // Posizioni attive con info tavola
     const posizioni = await pg.queryMany(
       `SELECT p.id, p.tavola_id, p.casella, p.tipo, p.dono_importo,
-              t.numero AS tavola_numero, t.livello, t.status AS tavola_status
+              t.numero AS tavola_numero, t.livello, t.status AS tavola_status,
+              CASE WHEN t.livello = 0 AND t.tipo = 'PERCORSO'
+                   THEN (t.turno - 1) * 6 + p.casella
+                   ELSE NULL END AS numero_posizione
        FROM posizioni p
        JOIN tavole t ON t.id = p.tavola_id
        WHERE p.wallet = $1
-       ORDER BY t.livello ASC, p.casella ASC`,
+       ORDER BY t.livello ASC, t.turno ASC, p.casella ASC`,
       [wallet]
     );
 
