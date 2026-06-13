@@ -364,56 +364,6 @@ app.post('/api/admin/security/unban', (req, res) => {
   res.json({ success: true, unbanned: ip });
 });
 
-// ── RICONCILIAZIONE INGRESSO (ONE-OFF, admin) — RIMUOVERE DOPO L'USO ──
-// Azzera lo stato di gioco URANO (tavole/posizioni/turni/donazioni/code/account
-// non-sistema; mantiene kyc_verifications), re-inizializza e ri-esegue in ordine
-// le donazioni reali fornite. Protetto da X-Admin-Key + conferma esplicita.
-app.post('/api/admin/reconcile-entry', async (req, res) => {
-  if (!checkAdmin(req, res)) return;
-  const { confirm, donations } = req.body || {};
-  if (confirm !== 'RECONCILE-ENTRY') {
-    return res.status(400).json({ error: "Conferma mancante: body.confirm deve essere 'RECONCILE-ENTRY'" });
-  }
-  if (!Array.isArray(donations) || donations.length === 0) {
-    return res.status(400).json({ error: 'donations[] obbligatorio: [{wallet, txHash}, ...] in ordine' });
-  }
-  try {
-    // 1. Assicura che tutte le tabelle esistano
-    await db.initDatabase();
-    try { await require('./gift-manager').initGiftTables(); } catch (_) {}
-    try { await donationQueue.initQueueTable(); } catch (_) {}
-
-    // 2. Azzera lo stato di gioco (solo tabelle esistenti dell'allowlist; mantiene kyc_verifications)
-    const targets = ['posizioni','tavole','turni','funzioni','contenitori','donazioni','doni_credito','storico_avanzamenti','coda_fifo','storico_uscite_fifo','flussi_esterni','bridge_log','predisposizioni','coda_crediti','doni_pendenti','messaggi','donation_queue','accounts'];
-    const existing = (await pg.queryMany(
-      `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ANY($1)`,
-      [targets]
-    )).map((r) => r.table_name);
-    if (existing.length) {
-      await pg.query(`TRUNCATE TABLE ${existing.map((t) => `"${t}"`).join(', ')} RESTART IDENTITY CASCADE`);
-    }
-    await pg.query(`DELETE FROM state_persistence WHERE key IN ('sistema','fifo_sistema')`);
-
-    // 3. Re-inizializza (FONDO/CASSA, tavola #1, turni)
-    const initState = await flow.inizializzaSistema();
-
-    // 4. Ri-esegui le donazioni reali in ordine (ognuna atomica via transazione)
-    const replays = [];
-    for (const d of donations) {
-      try {
-        const r = await flow.processaDonoEntrataWallet({ wallet: d.wallet, txHash: d.txHash });
-        replays.push({ wallet: d.wallet, ok: true, ticket: r.ticket, coppie: r.numeroCoppie, posizioni: Array.isArray(r.posizioni) ? r.posizioni.length : 0 });
-      } catch (e) {
-        replays.push({ wallet: d.wallet, ok: false, error: e.message });
-      }
-    }
-
-    res.json({ success: true, truncated: existing, initState, replays });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
 // ── DONI PENDENTI + MESSAGGI ──
 const giftManager = require('./gift-manager');
 
