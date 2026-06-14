@@ -1051,6 +1051,44 @@ app.post('/api/testimonianze/:id/rifiuta', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── ADMIN: Sblocca turno ENTRATA bloccato (one-shot fix) ──
+app.post('/api/admin/fix-turno-entrata', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    // Trova il turno ENTRATA IN_CORSO più recente con 6/6 sacerdoti
+    const turnoBloccato = await pg.queryOne(
+      `SELECT * FROM turni WHERE sezione='ENTRATA' AND livello=0 AND status='IN_CORSO'
+       AND sacerdoti_entrati >= sacerdoti_necessari ORDER BY numero_turno DESC LIMIT 1`
+    );
+    if (!turnoBloccato) return res.json({ success: false, error: 'Nessun turno ENTRATA bloccato trovato' });
+
+    // Prendi la prima SDOPPIAMENTO APERTA per convertirla in PERCORSO
+    const prossima = await pg.queryOne(
+      `SELECT * FROM tavole WHERE tipo='SDOPPIAMENTO' AND status='APERTA' AND livello=0 ORDER BY numero ASC LIMIT 1`
+    );
+    if (!prossima) return res.json({ success: false, error: 'Nessuna tavola SDOPPIAMENTO disponibile' });
+
+    const nuovoN = turnoBloccato.numero_turno + 1;
+
+    // Segna il turno bloccato come COMPLETATO
+    await pg.query(`UPDATE turni SET status='COMPLETATO', doni_totali=$1 WHERE id=$2`,
+      [60, turnoBloccato.id]);
+
+    // Converti la SDOPPIAMENTO in PERCORSO per il nuovo turno
+    await pg.query(`UPDATE tavole SET tipo='PERCORSO', turno=$1 WHERE id=$2`, [nuovoN, prossima.id]);
+
+    // Crea il nuovo turno ENTRATA
+    await db.createTurno({
+      sezione: 'ENTRATA', livello: 0, blocco: null, numeroTurno: nuovoN,
+      faraoneWallet: prossima.faraone_wallet, faraoneTipo: 'EREDE',
+      tavolaFaraoneNum: prossima.numero, sacerdotiNecessari: 6
+    });
+
+    console.log(`✅ [FIX] Turno ENTRATA #${turnoBloccato.numero_turno} completato → nuovo Turno #${nuovoN} creato, tavola #${prossima.numero} convertita a PERCORSO`);
+    res.json({ success: true, turnoChiuso: turnoBloccato.numero_turno, nuovoTurno: nuovoN, tavolaPercorso: prossima.numero });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── 404 ──
 app.use((_, res) => res.status(404).json({ success: false, error: 'Endpoint non trovato' }));
 
