@@ -1051,6 +1051,22 @@ app.post('/api/testimonianze/:id/rifiuta', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── ADMIN: Diagnostica signer address (non espone la chiave) ──
+app.get('/api/admin/signer-address', (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  if (!process.env.TREASURY_PRIVATE_KEY) return res.json({ error: 'TREASURY_PRIVATE_KEY non configurata' });
+  try {
+    const { ethers } = require('ethers');
+    const wallet = new ethers.Wallet(process.env.TREASURY_PRIVATE_KEY);
+    const isTesoreria = wallet.address.toLowerCase() === '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
+    res.json({
+      signerAddress: wallet.address,
+      isTesoreria,
+      message: isTesoreria ? '✅ Chiave corretta! E la tesoreria' : '❌ Chiave SBAGLIATA. Non e la tesoreria 0x4f53c427...'
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── ADMIN: Invia payout USDC on-chain dalla tesoreria ──
 app.post('/api/admin/invia-payout', async (req, res) => {
   if (!checkAdmin(req, res)) return;
