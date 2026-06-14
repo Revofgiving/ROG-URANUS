@@ -200,13 +200,15 @@ async function verificaDonazione({ txHash, walletMittente, importoMinimo = 20 })
   // Auto-calcolo coppie (per USDC: importo/20, per XAUt0: in base al valore in USD)
   let numeroPosizioni;
   if (tokenTrovato.key === 'XAUT0') {
-    // XAUt0: 1 token ≈ 1 oncia ≈ ~$5.000 → ogni posizione = 20 USD equivalenti
-    // Usiamo il valore approssimato, il backend può aggiornare con oracle in futuro
-    const GOLD_PRICE_USD = Number(process.env.GOLD_PRICE_USD || 5000);
+    // XAUt0: 1 token ≈ 1 oncia troy ≈ ~$4.675 USD (aggiornare GOLD_PRICE_USD su Coolify)
+    // Usa Math.round + tolleranza di 0.5 USDC per evitare errori di arrotondamento
+    // (es. 0.008556 XAUt0 × 4675 = 39.998 ≈ 40 USDC → deve dare 2 posizioni)
+    const GOLD_PRICE_USD = Number(process.env.GOLD_PRICE_USD || 4675);
     const usdEquivalent = importoEffettivo * GOLD_PRICE_USD;
-    numeroPosizioni = Math.max(1, Math.floor(usdEquivalent / 20));
+    // Tolleranza di 1 USDC per gestire arrotondamenti floating-point
+    numeroPosizioni = Math.max(1, Math.floor((usdEquivalent + 1.0) / 20));
     console.log(`   ✅ TX verificata: ${txHash}`);
-    console.log(`   🪩 Importo: ${importoEffettivo} ${tokenTrovato.symbol} (≈$${usdEquivalent.toFixed(2)} USD) → ${numeroPosizioni} coppie`);
+    console.log(`   🪩 Importo: ${importoEffettivo} ${tokenTrovato.symbol} (≈$${usdEquivalent.toFixed(2)} USD, prezzo oro $${GOLD_PRICE_USD}) → ${numeroPosizioni} coppie`);
   } else {
     numeroPosizioni = Math.max(1, Math.floor(importoEffettivo / 20));
     console.log(`   ✅ TX verificata: ${txHash}`);
