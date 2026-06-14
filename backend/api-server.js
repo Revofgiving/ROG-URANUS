@@ -1091,7 +1091,12 @@ app.post('/api/admin/invia-payout', async (req, res) => {
     }
 
     console.log(`💸 [PAYOUT] Invio ${importoUsdc} USDC a ${destinatario} — motivo: ${motivo || 'admin'}`);
-    const tx = await usdc.transfer(destinatario, amount, { gasLimit: 100000 });
+    // Polygon richiede gas tip >= 25 Gwei
+    const tx = await usdc.transfer(destinatario, amount, {
+      gasLimit: 100000,
+      maxPriorityFeePerGas: ethers.utils.parseUnits('35', 'gwei'),
+      maxFeePerGas: ethers.utils.parseUnits('100', 'gwei')
+    });
     const receipt = await tx.wait();
 
     console.log(`✅ [PAYOUT] TX: ${receipt.transactionHash}`);
