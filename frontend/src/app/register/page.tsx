@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import StarField from "@/components/effects/StarField";
 import { sendUsdc } from "@/lib/usdc";
-import { signInWithEthereum, saveSession } from "@/lib/auth";
+import { saveSession } from "@/lib/auth";
 import { dona } from "@/lib/api";
 type EthereumProvider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
@@ -239,26 +239,29 @@ export default function RegisterPage() {
 
       setWallet(accounts[0]);
 
-      // Switch a Polygon
-      try {
-        await ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: "0x89" }],
-        });
-      } catch (switchError: unknown) {
-        if ((switchError as EthereumError).code === 4902) {
+      // Switch a Polygon solo se necessario (evita popup inutile)
+      const currentChain = await ethereum.request({ method: "eth_chainId" }) as string;
+      if (currentChain !== "0x89") {
+        try {
           await ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [
-              {
-                chainId: "0x89",
-                chainName: "Polygon Mainnet",
-                nativeCurrency: { name: "MATIC", symbol: "POL", decimals: 18 },
-                rpcUrls: ["https://polygon-rpc.com"],
-                blockExplorerUrls: ["https://polygonscan.com"],
-              },
-            ],
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: "0x89" }],
           });
+        } catch (switchError: unknown) {
+          if ((switchError as EthereumError).code === 4902) {
+            await ethereum.request({
+              method: "wallet_addEthereumChain",
+              params: [
+                {
+                  chainId: "0x89",
+                  chainName: "Polygon Mainnet",
+                  nativeCurrency: { name: "MATIC", symbol: "POL", decimals: 18 },
+                  rpcUrls: ["https://polygon-rpc.com"],
+                  blockExplorerUrls: ["https://polygonscan.com"],
+                },
+              ],
+            });
+          }
         }
       }
 
@@ -296,9 +299,17 @@ export default function RegisterPage() {
         // Backend non ancora collegato
       }
 
-      // 3. Autenticazione SIWE
-      const session = await signInWithEthereum(ethereum, wallet);
-      saveSession(session);
+      // 3. Salva wallet per area personale (senza firma SIWE)
+      saveSession({
+        wallet,
+        name: wallet.slice(0, 6) + "..." + wallet.slice(-4),
+        message: "",
+        signature: "",
+        chainId: 137,
+        issuedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      });
+      localStorage.setItem("uranus_user", JSON.stringify({ wallet }));
 
       setAssignedNumber(ticket ?? 0);
       setStep("done");
