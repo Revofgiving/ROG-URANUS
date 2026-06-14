@@ -329,14 +329,17 @@ async function posizionaDonatoreEntrata(wallet, nome) {
       });
     }
 
-    // ✔️ FIX: posizionaSacerdoteInUrano in try-catch per garantire che
-    // avviaNuovoTurnoEntrata venga SEMPRE chiamata anche se Blocco 1 lancia un errore
-    // (es. gestisciUscitaFaraone al completamento Turno #1 di VENERE).
+    // ✔️ FIX DEFINITIVO: posizionaSacerdoteInUrano in SAVEPOINT.
+    // Il semplice try-catch non basta: se la funzione lancia un errore SQL
+    // la transazione PG rimane in stato "aborted" e avviaNuovoTurnoEntrata fallisce.
+    // Con savepoint(), in caso di errore si fa rollback SOLO di questo step
+    // lasciando la transazione principale attiva e funzionante.
     try {
-      await posizionaSacerdoteInUrano(eredeWallet, nomeErede);
+      const pgConn = require('./pg-connection-manager');
+      await pgConn.savepoint(() => posizionaSacerdoteInUrano(eredeWallet, nomeErede));
     } catch (sacerdoteErr) {
-      console.error(`⚠️ [ENTRATA] Errore posizionamento sacerdote in URANO (non bloccante): ${sacerdoteErr.message}`);
-      console.error(`   Il sacerdote verrà riposizionato nella prossima run. avviaNuovoTurnoEntrata procede comunque.`);
+      console.error(`⚠️ [ENTRATA] Sacerdote non posizionato in URANO (savepoint rollback): ${sacerdoteErr.message}`);
+      console.error(`   avviaNuovoTurnoEntrata procede comunque.`);
     }
 
     // ── OPZIONE 2: AUTO-ENTRY NETTUNO DA SOLE ─────────────────────
