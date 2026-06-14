@@ -329,9 +329,17 @@ async function posizionaDonatoreEntrata(wallet, nome) {
       });
     }
 
-    await posizionaSacerdoteInUrano(eredeWallet, nomeErede);
+    // ✔️ FIX: posizionaSacerdoteInUrano in try-catch per garantire che
+    // avviaNuovoTurnoEntrata venga SEMPRE chiamata anche se Blocco 1 lancia un errore
+    // (es. gestisciUscitaFaraone al completamento Turno #1 di VENERE).
+    try {
+      await posizionaSacerdoteInUrano(eredeWallet, nomeErede);
+    } catch (sacerdoteErr) {
+      console.error(`⚠️ [ENTRATA] Errore posizionamento sacerdote in URANO (non bloccante): ${sacerdoteErr.message}`);
+      console.error(`   Il sacerdote verrà riposizionato nella prossima run. avviaNuovoTurnoEntrata procede comunque.`);
+    }
 
-    // ── OPZIONE 2: AUTO-ENTRY NETTUNO DA SOLE ─────────────────────────
+    // ── OPZIONE 2: AUTO-ENTRY NETTUNO DA SOLE ─────────────────────
     // Ogni tavola L0 completata genera 1 posizione HUMAN in Nettuno per l'erede.
     // Alimenta Nettuno automaticamente senza costo aggiuntivo per l'utente.
     // Eseguito in coda background: non blocca la risposta né la cascata Blocco 1.
@@ -344,6 +352,7 @@ async function posizionaDonatoreEntrata(wallet, nome) {
     );
     console.log(`   🌊 Auto-entry Nettuno in coda: 1 HUMAN (${nomeErede}) da tavola Sole #${tavola.numero}`);
 
+    // SEMPRE chiamato: garantisce che il nuovo turno ENTRATA venga creato
     await avviaNuovoTurnoEntrata(turno);
   }
 
