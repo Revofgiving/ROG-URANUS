@@ -203,10 +203,11 @@ async function verificaDonazione({ txHash, walletMittente, importoMinimo = 20 })
     // XAUt0: 1 token ≈ 1 oncia troy ≈ ~$4.675 USD (aggiornare GOLD_PRICE_USD su Coolify)
     // Usa Math.round + tolleranza di 0.5 USDC per evitare errori di arrotondamento
     // (es. 0.008556 XAUt0 × 4675 = 39.998 ≈ 40 USDC → deve dare 2 posizioni)
-    const GOLD_PRICE_USD = Number(process.env.GOLD_PRICE_USD || 4675);
+    // GOLD_PRICE_USD impostato su Coolify (valore ufficiale: 4000 USD/oz)
+    // La tolleranza di 0.5 USDC gestisce arrotondamenti floating-point
+    const GOLD_PRICE_USD = Number(process.env.GOLD_PRICE_USD || 4000);
     const usdEquivalent = importoEffettivo * GOLD_PRICE_USD;
-    // Tolleranza di 1 USDC per gestire arrotondamenti floating-point
-    numeroPosizioni = Math.max(1, Math.floor((usdEquivalent + 1.0) / 20));
+    numeroPosizioni = Math.max(1, Math.floor((usdEquivalent + 0.5) / 20));
     console.log(`   ✅ TX verificata: ${txHash}`);
     console.log(`   🪩 Importo: ${importoEffettivo} ${tokenTrovato.symbol} (≈$${usdEquivalent.toFixed(2)} USD, prezzo oro $${GOLD_PRICE_USD}) → ${numeroPosizioni} coppie`);
   } else {
