@@ -1051,6 +1051,61 @@ app.post('/api/testimonianze/:id/rifiuta', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── ADMIN: Invia payout USDC on-chain dalla tesoreria ──
+app.post('/api/admin/invia-payout', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  const { destinatario, importoUsdc, motivo } = req.body;
+  if (!destinatario || !importoUsdc) return res.status(400).json({ error: 'destinatario e importoUsdc obbligatori' });
+  if (!process.env.TREASURY_PRIVATE_KEY) return res.status(500).json({ error: 'TREASURY_PRIVATE_KEY non configurata su Coolify' });
+
+  try {
+    const { ethers } = require('ethers');
+    const provider = new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL);
+    const signer = new ethers.Wallet(process.env.TREASURY_PRIVATE_KEY, provider);
+
+    const USDC_ABI = ['function transfer(address to, uint256 amount) returns (bool)',
+                      'function balanceOf(address) view returns (uint256)'];
+    const usdc = new ethers.Contract('0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', USDC_ABI, signer);
+
+    // Verifica saldo
+    const balance = await usdc.balanceOf(signer.address);
+    const amount = ethers.utils.parseUnits(importoUsdc.toString(), 6);
+    if (balance.lt(amount)) {
+      return res.status(400).json({ error: `Saldo insufficiente: ${ethers.utils.formatUnits(balance, 6)} USDC disponibili, richiesti ${importoUsdc}` });
+    }
+
+    console.log(`💸 [PAYOUT] Invio ${importoUsdc} USDC a ${destinatario} — motivo: ${motivo || 'admin'}`);
+    const tx = await usdc.transfer(destinatario, amount, { gasLimit: 100000 });
+    const receipt = await tx.wait();
+
+    console.log(`✅ [PAYOUT] TX: ${receipt.transactionHash}`);
+    res.json({
+      success: true,
+      txHash: receipt.transactionHash,
+      destinatario,
+      importoUsdc,
+      polygonscan: `https://polygonscan.com/tx/${receipt.transactionHash}`
+    });
+  } catch (e) {
+    console.error('Errore payout:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── ADMIN: Controlla crediti payout nel sistema ──
+app.get('/api/admin/crediti-payout', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    const storico = await pg.queryMany(
+      `SELECT wallet, tipo_account, netto, turno, evento, created_at
+       FROM storico_avanzamenti
+       WHERE evento IN ('USCITA_ENTRATA','USCITA_L3','USCITA_L4','USCITA_L5')
+       ORDER BY created_at DESC LIMIT 50`
+    );
+    res.json({ success: true, crediti: storico });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── ADMIN: Sblocca turno ENTRATA bloccato (one-shot fix) ──
 app.post('/api/admin/fix-turno-entrata', async (req, res) => {
   if (!checkAdmin(req, res)) return;
