@@ -28,6 +28,7 @@ const predisposizione = require('./predisposizione-manager');
 const chainRegistrar  = require('./chain-registrar');
 const goldConverter   = require('./gold-converter');
 const rogChecker      = require('./rog-prerequisite-checker');
+const payoutMgr       = require('./payout-manager');
 
 // Tesoreria on-chain: dove ARRIVANO e si registrano le donazioni (= destinatario verificato on-chain).
 const TREASURY_WALLET = process.env.URANO_FUND_WALLET || '0x0000000000000000000000000000000000000001';
@@ -429,7 +430,10 @@ async function posizionaDonatoreEntrata(wallet, nome) {
     );
     console.log(`   🌊 Auto-entry Nettuno in coda: 1 HUMAN (${nomeErede}) da tavola Sole #${tavola.numero}`);
 
-    // SEMPRE chiamato: garantisce che il nuovo turno ENTRATA venga creato
+    // SEMPRE chiamato: garantisce che il nuovo turno ENTRATA venga creato.
+    // NOTA: viene chiamato DENTRO la transazione padre (è corretto: le SDOPPIAMENTO
+    // create in questa stessa transazione sono già visibili nella stessa connessione PG).
+    // Il fallback in avviaNuovoTurnoEntrata copre il caso raro in cui non fossero disponibili.
     await avviaNuovoTurnoEntrata(turno);
   }
 
@@ -527,6 +531,23 @@ async function gestisciUscitaFaraone(turno) {
     await posizionaFaraoneInL4(faraoneWallet, nomeAccount);
   } else {
     console.log(`   🏁 Primario esce con ${bridgeResult.nettoFinale} USDC netti (dopo bridge)`);
+  }
+
+  // 💸 PAYOUT ON-CHAIN: per wallet di sistema (FONDO/CASSA) invia USDC automaticamente.
+  // Per wallet reali il pagamento avviene via 'ACCETTA DONO' nel dashboard.
+  if (tipoAccount === 'FONDO' && bridgeResult.nettoFinale > 0) {
+    const asyncQ = require('./async-queue');
+    asyncQ.enqueue(
+      async () => {
+        const result = await payoutMgr.inviaPagamento(
+          faraoneWallet, bridgeResult.nettoFinale,
+          `USCITA_L3 Turno ${turno.numero_turno}`
+        );
+        if (!result.success) console.error(`⚠️  [PAYOUT FONDO] Fallito: ${result.error}`);
+      },
+      `payout-fondo-l3-turno-${turno.numero_turno}`
+    );
+    console.log(`   💸 [PAYOUT FONDO] In coda: ${bridgeResult.nettoFinale} USDC → ${faraoneWallet.substring(0, 12)}...`);
   }
 
   await db.completaTurno(turno.id, doniRicevuti);
