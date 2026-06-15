@@ -21,11 +21,12 @@ const results = new Map();  // jobId → risultato (in memoria, TTL 10 min)
 let processing = false;
 let totalProcessed = 0;
 let totalErrors = 0;
-// ── RETRY automatico su transazioni ancora in pending ──
-// Se al momento del processing la tx non e ancora confermata on-chain, NON falliamo
-// subito: ri-accodiamo il job e ritentiamo, perche la conferma puo arrivare dopo.
-const MAX_TX_ATTEMPTS = Number(process.env.DONA_TX_MAX_ATTEMPTS || 40); // ~3-4 min a 5s/tentativo
-const TX_RETRY_DELAY_MS = Number(process.env.DONA_TX_RETRY_MS || 5000);
+// ── RETRY automatico su transazioni ancora in pending O turno bloccato ──
+// Copre due casi:
+//   1. TX non ancora confermata su Polygon (RPC lag)
+//   2. Turno ENTRATA bloccato — il watchdog lo ripara entro 60s, la coda riprova
+const MAX_TX_ATTEMPTS = Number(process.env.DONA_TX_MAX_ATTEMPTS || 60); // ~3 min a 3s/tentativo
+const TX_RETRY_DELAY_MS = Number(process.env.DONA_TX_RETRY_MS || 3000); // 3s = risposta rapida
 
 // ── INIT: crea tabella coda se non esiste ──
 
@@ -178,8 +179,12 @@ async function processNext() {
     console.log(`✅ [DonationQueue] Completato: ${job.id} ticket=${result.ticket || '?'} (processati: ${totalProcessed})`);
 
   } catch (err) {
-    const isRetryable = !!(err && (err.retryable || err.code === 'TX_PENDING' || err.code === 'RPC_ERROR'
-      || /non trovata su Polygon|in pending|Impossibile contattare Polygon/i.test(err.message || '')));
+    const isRetryable = !!(err && (
+      err.retryable ||
+      err.code === 'TX_PENDING' ||
+      err.code === 'RPC_ERROR' ||
+      /non trovata su Polygon|in pending|Impossibile contattare Polygon|Nessun turno attivo|Nessuna tavola aperta|watchdog in corso/i.test(err.message || '')
+    ));
     job.attempts = (job.attempts || 0) + 1;
 
     if (isRetryable && job.attempts < MAX_TX_ATTEMPTS) {
@@ -259,9 +264,61 @@ function getStats() {
   };
 }
 
+// ── RETRY DONAZIONI FALLITE (chiamato dal watchdog dopo fix turno) ──
+
+/**
+ * Riaccoda le donazioni FAILED recenti che sono fallite per turno bloccato.
+ * Chiamato dal watchdog ogni volta che sblocca un turno.
+ */
+async function retryFailedTurnoJobs() {
+  try {
+    // Cerca job FAILED nelle ultime 2 ore con errore turno
+    const failedJobs = await pg.queryMany(
+      `SELECT * FROM donation_queue
+       WHERE status = 'FAILED'
+         AND created_at > NOW() - INTERVAL '2 hours'
+         AND result::text ILIKE '%turno%'
+       ORDER BY created_at ASC
+       LIMIT 20`
+    );
+
+    if (!failedJobs.length) return;
+
+    console.log(`\ud83d\udd04 [DonationQueue] Riaccodo ${failedJobs.length} donazioni fallite per turno bloccato...`);
+
+    for (const row of failedJobs) {
+      // Rimetti a QUEUED nel DB
+      await pg.query(
+        `UPDATE donation_queue SET status = 'QUEUED', result = NULL WHERE id = $1`,
+        [row.id]
+      );
+
+      // Riaccoda in memoria
+      const job = {
+        id: row.id,
+        wallet: row.wallet,
+        txHash: row.tx_hash,
+        numeroPosizioni: row.num_posizioni || 1,
+        nome: row.nome,
+        status: 'QUEUED',
+        createdAt: row.created_at,
+        attempts: 0,
+      };
+
+      queue.push(job);
+      console.log(`   \u21ba Riaccoda: ${row.id} wallet=${row.wallet.substring(0, 10)}`);
+    }
+
+    if (!processing) processNext();
+  } catch (e) {
+    console.error('\u26a0\ufe0f [DonationQueue] retryFailedTurnoJobs errore:', e.message);
+  }
+}
+
 module.exports = {
   initQueueTable,
   enqueue,
   getStatus,
   getStats,
+  retryFailedTurnoJobs,
 };

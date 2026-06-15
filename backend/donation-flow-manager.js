@@ -346,14 +346,26 @@ async function autoRecoverTurnoEntrata() {
 async function watchdogTurnoEntrata() {
   try {
     const turno = await db.getTurnoCorrente('ENTRATA', 0);
+    let fixed = false;
+
     if (!turno) {
       console.warn('\ud83d\udd27 [WATCHDOG] Nessun turno ENTRATA attivo \u2192 auto-recovery');
       await autoRecoverTurnoEntrata();
-      return;
-    }
-    if (Number(turno.sacerdoti_entrati) >= Number(turno.sacerdoti_necessari)) {
+      fixed = true;
+    } else if (Number(turno.sacerdoti_entrati) >= Number(turno.sacerdoti_necessari)) {
       console.warn(`\ud83d\udd27 [WATCHDOG] Turno #${turno.numero_turno} bloccato (${turno.sacerdoti_entrati}/${turno.sacerdoti_necessari}) \u2192 sblocco`);
       await avviaNuovoTurnoEntrata(turno);
+      fixed = true;
+    }
+
+    // Se abbiamo sbloccato un turno, riaccoda subito le donazioni FAILED per turno
+    if (fixed) {
+      try {
+        const donationQueue = require('./donation-queue');
+        await donationQueue.retryFailedTurnoJobs();
+      } catch (e2) {
+        console.error('\u26a0\ufe0f [WATCHDOG] retryFailedTurnoJobs errore:', e2.message);
+      }
     }
   } catch (e) {
     console.error(`\u26a0\ufe0f [WATCHDOG] Errore: ${e.message}`);
@@ -366,10 +378,19 @@ async function posizionaDonatoreEntrata(wallet, nome) {
     // Tentativo automatico di recupero prima di fallire
     console.warn(`\u26a0\ufe0f  [AUTO-RECOVERY] Nessun turno attivo per ${wallet.substring(0,10)} \u2192 recupero...`);
     turno = await autoRecoverTurnoEntrata();
-    if (!turno) throw new Error('Nessun turno attivo al livello di entrata');
+    if (!turno) {
+      // Errore RETRYABLE: il watchdog lo sistema entro 60s, la coda riprova automaticamente
+      const err = new Error('Nessun turno attivo — watchdog in corso, retry automatico');
+      err.retryable = true;
+      throw err;
+    }
   }
   const tavola = await tableManager.getTavolaPercorsoAttiva(0, turno.numero_turno);
-  if (!tavola) throw new Error('Nessuna tavola aperta al livello di entrata');
+  if (!tavola) {
+    const err = new Error('Nessuna tavola aperta al livello di entrata — retry automatico');
+    err.retryable = true;
+    throw err;
+  }
 
   const r = await tableManager.posizionaDonatore({
     tavolaId: tavola.id, tavolaNumero: tavola.numero, livello: 0,
