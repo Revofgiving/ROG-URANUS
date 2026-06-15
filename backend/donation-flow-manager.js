@@ -290,9 +290,83 @@ async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome
 // POSIZIONAMENTO L0
 // ========================================
 
+// ========================================
+// AUTO-RECOVERY TURNO ENTRATA
+// ========================================
+
+async function autoRecoverTurnoEntrata() {
+  const pg = require('./pg-connection-manager');
+
+  // Caso A: turno IN_CORSO con sacerdoti >= necessari (stuck 6/6)
+  const turnoStuck = await pg.queryOne(
+    `SELECT * FROM turni WHERE sezione='ENTRATA' AND livello=0 AND status='IN_CORSO'
+     AND sacerdoti_entrati >= sacerdoti_necessari ORDER BY numero_turno DESC LIMIT 1`
+  );
+  if (turnoStuck) {
+    console.warn(`\u26a0\ufe0f  [AUTO-RECOVERY] Turno #${turnoStuck.numero_turno} stuck ${turnoStuck.sacerdoti_entrati}/${turnoStuck.sacerdoti_necessari} \u2192 sblocco automatico`);
+    await avviaNuovoTurnoEntrata(turnoStuck);
+    return await db.getTurnoCorrente('ENTRATA', 0);
+  }
+
+  // Caso B: nessun turno IN_CORSO — trova l'ultimo e riparte
+  const pg2 = require('./pg-connection-manager');
+  const ultimo = await pg2.queryOne(
+    `SELECT * FROM turni WHERE sezione='ENTRATA' AND livello=0 ORDER BY numero_turno DESC LIMIT 1`
+  );
+  if (!ultimo) return null;
+
+  const nuovoN = ultimo.numero_turno + 1;
+
+  // Se esiste già un turno con questo numero in stato anomalo, lo riattiva
+  const esistente = await pg2.queryOne(
+    `SELECT * FROM turni WHERE sezione='ENTRATA' AND livello=0 AND numero_turno=$1`, [nuovoN]
+  );
+  if (esistente) {
+    if (esistente.status !== 'IN_CORSO') {
+      await pg2.query(`UPDATE turni SET status='IN_CORSO' WHERE id=$1`, [esistente.id]);
+      console.warn(`\u26a0\ufe0f  [AUTO-RECOVERY] Turno #${nuovoN} riattivato (era ${esistente.status})`);
+    }
+    return await db.getTurnoCorrente('ENTRATA', 0);
+  }
+
+  // Crea nuovo turno di emergenza con FONDO
+  console.warn(`\ud83d\udd27 [AUTO-RECOVERY] Creo turno ENTRATA #${nuovoN} di emergenza`);
+  const nuovaTavola = await tableManager.creaTavolaPercorso(0, FONDO_WALLET, nuovoN);
+  await db.createTurno({
+    sezione: 'ENTRATA', livello: 0, blocco: null, numeroTurno: nuovoN,
+    faraoneWallet: FONDO_WALLET, faraoneTipo: 'FONDO',
+    tavolaFaraoneNum: nuovaTavola.numero, sacerdotiNecessari: 6
+  });
+  console.log(`\ud83d\udd04 [AUTO-RECOVERY] Turno #${nuovoN} creato \u2192 sistema riattivato (tavola #${nuovaTavola.numero})`);
+  return await db.getTurnoCorrente('ENTRATA', 0);
+}
+
+// Watchdog esportato: chiamato ogni 60s da api-server.js
+async function watchdogTurnoEntrata() {
+  try {
+    const turno = await db.getTurnoCorrente('ENTRATA', 0);
+    if (!turno) {
+      console.warn('\ud83d\udd27 [WATCHDOG] Nessun turno ENTRATA attivo \u2192 auto-recovery');
+      await autoRecoverTurnoEntrata();
+      return;
+    }
+    if (Number(turno.sacerdoti_entrati) >= Number(turno.sacerdoti_necessari)) {
+      console.warn(`\ud83d\udd27 [WATCHDOG] Turno #${turno.numero_turno} bloccato (${turno.sacerdoti_entrati}/${turno.sacerdoti_necessari}) \u2192 sblocco`);
+      await avviaNuovoTurnoEntrata(turno);
+    }
+  } catch (e) {
+    console.error(`\u26a0\ufe0f [WATCHDOG] Errore: ${e.message}`);
+  }
+}
+
 async function posizionaDonatoreEntrata(wallet, nome) {
-  const turno = await db.getTurnoCorrente('ENTRATA', 0);
-  if (!turno) throw new Error('Nessun turno attivo al livello di entrata');
+  let turno = await db.getTurnoCorrente('ENTRATA', 0);
+  if (!turno) {
+    // Tentativo automatico di recupero prima di fallire
+    console.warn(`\u26a0\ufe0f  [AUTO-RECOVERY] Nessun turno attivo per ${wallet.substring(0,10)} \u2192 recupero...`);
+    turno = await autoRecoverTurnoEntrata();
+    if (!turno) throw new Error('Nessun turno attivo al livello di entrata');
+  }
   const tavola = await tableManager.getTavolaPercorsoAttiva(0, turno.numero_turno);
   if (!tavola) throw new Error('Nessuna tavola aperta al livello di entrata');
 
@@ -378,7 +452,21 @@ async function avviaNuovoTurnoEntrata(turnoChiuso) {
   const prossima = await pg.queryOne(
     `SELECT * FROM tavole WHERE tipo='SDOPPIAMENTO' AND status='APERTA' AND livello=0 ORDER BY numero ASC LIMIT 1`
   );
-  if (!prossima) { console.log('⚠️  Nessuna tavola sdoppiamento per turno entrata'); return; }
+
+  if (!prossima) {
+    // FALLBACK: nessuna tavola SDOPPIAMENTO disponibile
+    // Creiamo una tavola di emergenza con FONDO come erede
+    // cos\u00ec il sistema non rimane mai senza turno attivo.
+    console.warn(`\u26a0\ufe0f  [AUTO-RECOVERY] Nessuna tavola SDOPPIAMENTO per turno #${nuovoN} \u2192 tavola emergenza con FONDO`);
+    const nuovaTavola = await tableManager.creaTavolaPercorso(0, FONDO_WALLET, nuovoN);
+    await db.createTurno({
+      sezione: 'ENTRATA', livello: 0, blocco: null, numeroTurno: nuovoN,
+      faraoneWallet: FONDO_WALLET, faraoneTipo: 'FONDO',
+      tavolaFaraoneNum: nuovaTavola.numero, sacerdotiNecessari: 6
+    });
+    console.log(`\ud83d\udd04 [AUTO-RECOVERY] Turno entrata #${nuovoN} avviato (tavola emergenza #${nuovaTavola.numero})`);
+    return;
+  }
 
   await pg.query(`UPDATE tavole SET tipo='PERCORSO', turno=$1 WHERE id=$2`, [nuovoN, prossima.id]);
   await db.createTurno({
@@ -386,7 +474,7 @@ async function avviaNuovoTurnoEntrata(turnoChiuso) {
     faraoneWallet: prossima.faraone_wallet, faraoneTipo: 'EREDE',
     tavolaFaraoneNum: prossima.numero, sacerdotiNecessari: 6
   });
-  console.log(`\n🔄 Turno entrata #${nuovoN} — erede: ${prossima.faraone_wallet.substring(0, 12)}...`);
+  console.log(`\n\ud83d\udd04 Turno entrata #${nuovoN} \u2014 erede: ${prossima.faraone_wallet.substring(0, 12)}...`);
 }
 
 // ========================================
@@ -840,5 +928,6 @@ module.exports = {
   posizionaFaraoneInL4, gestisciUscitaL4,
   posizionaFaraoneInL5, gestisciUscitaL5,
   getStatoSistema,
+  watchdogTurnoEntrata,
   FONDO_WALLET, CASSA_WALLET, FONDO_SIGLA
 };

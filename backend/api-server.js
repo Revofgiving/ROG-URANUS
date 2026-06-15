@@ -1127,41 +1127,16 @@ app.get('/api/admin/crediti-payout', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── ADMIN: Sblocca turno ENTRATA bloccato (one-shot fix) ──
+// ── ADMIN: Sblocca turno ENTRATA (ora delega all'auto-recovery interno) ──
 app.post('/api/admin/fix-turno-entrata', async (req, res) => {
   if (!checkAdmin(req, res)) return;
   try {
-    // Trova il turno ENTRATA IN_CORSO più recente con 6/6 sacerdoti
-    const turnoBloccato = await pg.queryOne(
-      `SELECT * FROM turni WHERE sezione='ENTRATA' AND livello=0 AND status='IN_CORSO'
-       AND sacerdoti_entrati >= sacerdoti_necessari ORDER BY numero_turno DESC LIMIT 1`
-    );
-    if (!turnoBloccato) return res.json({ success: false, error: 'Nessun turno ENTRATA bloccato trovato' });
-
-    // Prendi la prima SDOPPIAMENTO APERTA per convertirla in PERCORSO
-    const prossima = await pg.queryOne(
-      `SELECT * FROM tavole WHERE tipo='SDOPPIAMENTO' AND status='APERTA' AND livello=0 ORDER BY numero ASC LIMIT 1`
-    );
-    if (!prossima) return res.json({ success: false, error: 'Nessuna tavola SDOPPIAMENTO disponibile' });
-
-    const nuovoN = turnoBloccato.numero_turno + 1;
-
-    // Segna il turno bloccato come COMPLETATO
-    await pg.query(`UPDATE turni SET status='COMPLETATO', doni_totali=$1 WHERE id=$2`,
-      [60, turnoBloccato.id]);
-
-    // Converti la SDOPPIAMENTO in PERCORSO per il nuovo turno
-    await pg.query(`UPDATE tavole SET tipo='PERCORSO', turno=$1 WHERE id=$2`, [nuovoN, prossima.id]);
-
-    // Crea il nuovo turno ENTRATA
-    await db.createTurno({
-      sezione: 'ENTRATA', livello: 0, blocco: null, numeroTurno: nuovoN,
-      faraoneWallet: prossima.faraone_wallet, faraoneTipo: 'EREDE',
-      tavolaFaraoneNum: prossima.numero, sacerdotiNecessari: 6
-    });
-
-    console.log(`✅ [FIX] Turno ENTRATA #${turnoBloccato.numero_turno} completato → nuovo Turno #${nuovoN} creato, tavola #${prossima.numero} convertita a PERCORSO`);
-    res.json({ success: true, turnoChiuso: turnoBloccato.numero_turno, nuovoTurno: nuovoN, tavolaPercorso: prossima.numero });
+    const flowMgr = require('./donation-flow-manager');
+    await flowMgr.watchdogTurnoEntrata();
+    const turnoNuovo = await db.getTurnoCorrente('ENTRATA', 0);
+    if (!turnoNuovo) return res.json({ success: false, error: 'Impossibile creare turno ENTRATA' });
+    console.log(`✅ [FIX] Turno ENTRATA attivo: #${turnoNuovo.numero_turno}`);
+    res.json({ success: true, turnoChiuso: turnoNuovo.numero_turno - 1, nuovoTurno: turnoNuovo.numero_turno, tavolaPercorso: turnoNuovo.tavola_faraone_num });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1170,13 +1145,21 @@ app.use((_, res) => res.status(404).json({ success: false, error: 'Endpoint non 
 
 // ── START ──
 app.listen(PORT, async () => {
-  console.log(`\n🌀 SUPERURANO v4 Backend — URANO 2 (tavole) + Nettuno (FIFO)`);
+  console.log(`\n\ud83c\udf00 SUPERURANO v4 Backend — URANO 2 (tavole) + Nettuno (FIFO)`);
   console.log(`   Server: http://localhost:${PORT}`);
   console.log(`   20 USDC → Sole → Luna → Mercurio → Venere → Giove → Saturno → Nettuno → Uranus`);
   console.log(`   Percorso: L0(Sole)→L1(Luna)→L2(Mercurio)→L3(Venere)→L4(Giove)→L5(Saturno) → Nettuno(FIFO) → Uranus\n`);
-  try { await db.initDatabase(); } catch (err) { console.error('❌ DB:', err.message); }
-  // Inizializza coda donazioni asincrona
-  try { await donationQueue.initQueueTable(); } catch (err) { console.error('❌ DonationQueue:', err.message); }
+  try { await db.initDatabase(); } catch (err) { console.error('\u274c DB:', err.message); }
+  try { await donationQueue.initQueueTable(); } catch (err) { console.error('\u274c DonationQueue:', err.message); }
+  // 🔧 WATCHDOG AUTOMATICO: ogni 60 secondi verifica e ripara il turno ENTRATA.
+  // Il sistema non richiede più alcun intervento manuale.
+  setInterval(async () => {
+    try {
+      const flowMgr = require('./donation-flow-manager');
+      await flowMgr.watchdogTurnoEntrata();
+    } catch (e) { console.error('⚠️ [WATCHDOG] Errore:', e.message); }
+  }, 60_000);
+  console.log('🔧 Watchdog turno entrata attivo (auto-recovery ogni 60s)');
 });
 
 module.exports = app;
