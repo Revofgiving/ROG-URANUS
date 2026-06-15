@@ -94,7 +94,10 @@ async function checkRogDonation(wallet) {
   const totalPositions = data.totalePosizioniAttive || data.totalPositions || positions.length;
 
   // CHECK PRINCIPALE: almeno 1 posizione con numero >= POSIZIONE_MINIMA_ROG (8/6/2026)
-  const hasQualifyingPosition = positions.some(p => Number(p.posizione || 0) >= POSIZIONE_MINIMA_ROG);
+  // OPPURE: membro storico con >= 3 posizioni ROG (consolidato prima del threshold)
+  const hasQualifyingPosition =
+    positions.some(p => Number(p.posizione || 0) >= POSIZIONE_MINIMA_ROG) ||
+    positions.length >= 3;
 
   console.log(`🔐 [ROG-Check] ${wallet}: ${totalPositions} posizioni totali, qualificante (>=${POSIZIONE_MINIMA_ROG}): ${hasQualifyingPosition ? '✅' : '❌'}`);
 
