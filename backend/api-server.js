@@ -1070,47 +1070,67 @@ app.get('/api/admin/signer-address', (req, res) => {
 // ── ADMIN: Invia payout USDC on-chain dalla tesoreria ──
 app.post('/api/admin/invia-payout', async (req, res) => {
   if (!checkAdmin(req, res)) return;
-  const { destinatario, importoUsdc, motivo } = req.body;
+  const { destinatario, importoUsdc, motivo, nonce: nonceOverride } = req.body;
   if (!destinatario || !importoUsdc) return res.status(400).json({ error: 'destinatario e importoUsdc obbligatori' });
   if (!process.env.TREASURY_PRIVATE_KEY) return res.status(500).json({ error: 'TREASURY_PRIVATE_KEY non configurata su Coolify' });
 
-  try {
-    const { ethers } = require('ethers');
-    const provider = new ethers.providers.JsonRpcProvider(process.env.POLYGON_RPC_URL);
-    const signer = new ethers.Wallet(process.env.TREASURY_PRIVATE_KEY, provider);
+  // RPC con fallback: se Alchemy blocca usiamo endpoint pubblici Polygon
+  const RPC_LIST = [
+    process.env.POLYGON_RPC_URL,
+    'https://polygon-rpc.com',
+    'https://rpc-mainnet.matic.quiknode.pro',
+    'https://1rpc.io/matic',
+  ].filter(Boolean);
 
-    const USDC_ABI = ['function transfer(address to, uint256 amount) returns (bool)',
-                      'function balanceOf(address) view returns (uint256)'];
-    const usdc = new ethers.Contract('0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', USDC_ABI, signer);
+  const USDC_ABI = ['function transfer(address to, uint256 amount) returns (bool)',
+                    'function balanceOf(address) view returns (uint256)'];
+  const USDC_ADDR = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
 
-    // Verifica saldo
-    const balance = await usdc.balanceOf(signer.address);
-    const amount = ethers.utils.parseUnits(importoUsdc.toString(), 6);
-    if (balance.lt(amount)) {
-      return res.status(400).json({ error: `Saldo insufficiente: ${ethers.utils.formatUnits(balance, 6)} USDC disponibili, richiesti ${importoUsdc}` });
+  let lastError = null;
+
+  for (const rpcUrl of RPC_LIST) {
+    try {
+      const { ethers } = require('ethers');
+      const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+      const signer   = new ethers.Wallet(process.env.TREASURY_PRIVATE_KEY, provider);
+      const usdc     = new ethers.Contract(USDC_ADDR, USDC_ABI, signer);
+
+      // Verifica saldo (solo sul primo RPC)
+      if (rpcUrl === RPC_LIST[0]) {
+        const balance = await usdc.balanceOf(signer.address);
+        const amount  = ethers.utils.parseUnits(importoUsdc.toString(), 6);
+        if (balance.lt(amount)) {
+          return res.status(400).json({ error: `Saldo insufficiente: ${ethers.utils.formatUnits(balance, 6)} USDC disponibili` });
+        }
+      }
+
+      // Nonce: usa override se passato (per rimpiazzare TX stuck), altrimenti auto
+      const txParams = {
+        gasLimit: 120000,
+        maxPriorityFeePerGas: ethers.utils.parseUnits('100', 'gwei'), // Alto per rimpiazzare TX stuck
+        maxFeePerGas:         ethers.utils.parseUnits('200', 'gwei'),
+      };
+      if (nonceOverride !== undefined) txParams.nonce = Number(nonceOverride);
+
+      console.log(`💸 [PAYOUT] ${importoUsdc} USDC → ${destinatario} (RPC: ${rpcUrl.substring(0,30)}...)`);
+      const amount = ethers.utils.parseUnits(importoUsdc.toString(), 6);
+      const tx = await usdc.transfer(destinatario, amount, txParams);
+      const receipt = await tx.wait();
+
+      console.log(`✅ [PAYOUT] Confermata: ${receipt.transactionHash}`);
+      return res.json({
+        success: true, txHash: receipt.transactionHash,
+        destinatario, importoUsdc, rpcUsato: rpcUrl,
+        polygonscan: `https://polygonscan.com/tx/${receipt.transactionHash}`
+      });
+
+    } catch (e) {
+      lastError = e.message;
+      console.warn(`⚠️ [PAYOUT] RPC ${rpcUrl.substring(0,30)} fallito: ${e.message.substring(0,80)}`);
     }
-
-    console.log(`💸 [PAYOUT] Invio ${importoUsdc} USDC a ${destinatario} — motivo: ${motivo || 'admin'}`);
-    // Polygon richiede gas tip >= 25 Gwei
-    const tx = await usdc.transfer(destinatario, amount, {
-      gasLimit: 100000,
-      maxPriorityFeePerGas: ethers.utils.parseUnits('35', 'gwei'),
-      maxFeePerGas: ethers.utils.parseUnits('100', 'gwei')
-    });
-    const receipt = await tx.wait();
-
-    console.log(`✅ [PAYOUT] TX: ${receipt.transactionHash}`);
-    res.json({
-      success: true,
-      txHash: receipt.transactionHash,
-      destinatario,
-      importoUsdc,
-      polygonscan: `https://polygonscan.com/tx/${receipt.transactionHash}`
-    });
-  } catch (e) {
-    console.error('Errore payout:', e.message);
-    res.status(500).json({ error: e.message });
   }
+
+  res.status(500).json({ error: lastError || 'Tutti gli RPC hanno fallito' });
 });
 
 // ── ADMIN: Controlla crediti payout nel sistema ──
@@ -1124,6 +1144,26 @@ app.get('/api/admin/crediti-payout', async (req, res) => {
        ORDER BY created_at DESC LIMIT 50`
     );
     res.json({ success: true, crediti: storico });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── ADMIN: Processa donazione con bypass ROG (per membri storici) ──
+app.post('/api/admin/processa-dona', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  const { wallet, txHash } = req.body;
+  if (!wallet || !txHash) return res.status(400).json({ error: 'wallet e txHash obbligatori' });
+  try {
+    const flowMgr = require('./donation-flow-manager');
+    // Usa DEV_SKIP_PREFIX per bypassare il check ROG mantenendo verifica blockchain
+    // ma con txHash reale. Inseriamo direttamente con override.
+    const result = await flowMgr.processaDonoEntrataWallet({
+      wallet: wallet.toLowerCase(),
+      txHash,
+      numeroPosizioni: null,
+      nome: null,
+      skipRog: true,
+    });
+    res.json({ success: true, ...result });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
