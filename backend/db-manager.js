@@ -616,7 +616,7 @@ async function getPosizioneAttivaEntrata(wallet) {
             t.numero AS tavola_numero, t.status AS tavola_status, t.turno
      FROM posizioni p
      JOIN tavole t ON p.tavola_id = t.id
-     WHERE p.wallet = $1 AND t.livello = 0 AND t.status = 'APERTA'
+     WHERE p.wallet = $1 AND t.livello = 0
        AND p.tipo = 'DONATORE' AND p.status = 'ATTIVO'
      LIMIT 1`,
     [wallet.toLowerCase()]
