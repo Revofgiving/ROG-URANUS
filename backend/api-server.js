@@ -1179,7 +1179,34 @@ app.post('/api/admin/fix-turno-entrata', async (req, res) => {
     res.json({ success: true, turnoChiuso: turnoNuovo.numero_turno - 1, nuovoTurno: turnoNuovo.numero_turno, tavolaPercorso: turnoNuovo.tavola_faraone_num });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+// ── ADMIN: Recupera rientro — posiziona manualmente un wallet in Sole L0 ──
+app.post('/api/admin/recupera-rientro', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
 
+  const { wallet, nome } = req.body;
+
+  if (!wallet)
+    return res.status(400).json({ error: 'wallet obbligatorio' });
+
+  if (!/^0x[a-fA-F0-9]{40}$/.test(wallet))
+    return res.status(400).json({ error: 'Wallet non valido' });
+
+  try {
+    const flowMgr = require('./donation-flow-manager');
+
+    const result = await flowMgr.posizionaDonatoreEntrata(
+      wallet.toLowerCase(),
+      nome || null
+    );
+
+    res.json({
+      success: true,
+      ...result
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 // ── 404 ──
 app.use((_, res) => res.status(404).json({ success: false, error: 'Endpoint non trovato' }));
 
