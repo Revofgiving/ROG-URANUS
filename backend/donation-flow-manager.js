@@ -951,7 +951,10 @@ async function getStatoSistema() {
 async function posizionaDonatoreEntrataCross(wallet, nome) {
   await db.initDatabase();
   const w = wallet.toLowerCase();
-
+const rogStatus = await rogChecker.checkAllPrerequisites(w);
+if (!rogStatus.canProceed) {
+  throw new Error('Prerequisiti ROG non soddisfatti');
+}
   // Crea account se non esiste
   let account = await db.getAccount(w);
   if (!account) {
