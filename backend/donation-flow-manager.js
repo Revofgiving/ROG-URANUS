@@ -968,6 +968,7 @@ if (!rogStatus.canProceed) {
 module.exports = {
   inizializzaSistema,
   processaDonoEntrataWallet,
+  posizionaDonatoreEntrata,
   posizionaDonatoreEntrataCross,
   gestisciUscitaFaraone,
   posizionaFaraoneInL4, gestisciUscitaL4,
