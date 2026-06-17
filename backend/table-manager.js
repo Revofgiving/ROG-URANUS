@@ -125,24 +125,38 @@ async function creaTavolaSdoppiamento(livello, donatoreWallet, turno) {
  * @returns {Object} { posizione, tavolaSdoppiamento }
  */
 async function posizionaDonatore({ tavolaId, tavolaNumero, livello, wallet, nome, tipo, donoImporto, turno, sdoppiabile = true }) {
-  // Conta posizioni già occupate (escluso l'erede al centro)
-  const occupate = await db.countPosizioniInTavola(tavolaId);
-  const config = getLivelloConfig(livello);
-  const casella = occupate + 1;
+const config = getLivelloConfig(livello);
+
+// Retry automatico su duplicate key (race condition casella)
+const MAX_RETRIES = 3;
+let posizione = null;
+let occupate = null;
+let casella = null;
+
+for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  occupate = await db.countPosizioniInTavola(tavolaId);
+  casella = occupate + 1;
 
   if (casella > config.capacita) {
     throw new Error(`Tavola #${tavolaNumero} piena (${occupate}/${config.capacita})`);
   }
 
-  // Inserisci posizione
-  const posizione = await db.createPosizione({
-    tavolaId,
-    casella,
-    wallet,
-    nome,
-    tipo,
-    donoImporto
-  });
+  try {
+    posizione = await db.createPosizione({
+      tavolaId,
+      casella,
+      wallet,
+      nome,
+      tipo,
+      donoImporto
+    });
+    break;
+  } catch (err) {
+    const isDuplicate = err.message && err.message.includes('posizioni_tavola_id_casella_key');
+    if (!isDuplicate || attempt === MAX_RETRIES) throw err;
+    console.warn(`⚠️ posizionaDonatore: casella ${casella} già occupata (attempt ${attempt}/${MAX_RETRIES}) — ricalcolo...`);
+  }
+}
 
   // Aggiorna totale doni ricevuti nella tavola
   await db.updateTavolaDoni(tavolaNumero, donoImporto);
