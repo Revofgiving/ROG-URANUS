@@ -176,8 +176,20 @@ async function registerDonation(wallet, amountUsdc, txHash) {
  * @param {string} txHash - Hash tx payout (o stringa interna)
  */
 async function registerPayout(wallet, amountUsdc, level, txHash) {
-  return fireAndForget(`Payout L${level} ${wallet.substring(0, 10)} ${amountUsdc} USDC`, () =>
-    contract.registerPayout(wallet, usdcToWei(amountUsdc), level, txHashToBytes32(txHash))
+  return fireAndForget(
+    `Payout L${level} ${wallet.substring(0, 10)} ${amountUsdc} USDC`,
+    () =>
+      contract.registerPayout(
+        wallet,
+        usdcToWei(amountUsdc),
+        level,
+        txHashToBytes32(txHash),
+        {
+          gasLimit: 100000,
+          maxPriorityFeePerGas: ethers.utils.parseUnits('35', 'gwei'),
+          maxFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
+        }
+      )
   );
 }
 
