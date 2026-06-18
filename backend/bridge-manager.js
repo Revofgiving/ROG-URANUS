@@ -194,11 +194,15 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale) {
 
   // 3. Cascata FIFO → coda background (non blocca la risposta)
   asyncQ.enqueue(() => queue.processaUsciteCascata(), 'cascata-fifo-l3');
+  
+// 5. DONO PENDENTE: l'utente deve cliccare ACCETTA DONO (90 giorni)
+console.log(`   🎁 DONO PENDENTE: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 90 giorni)`);
+await giftManager.creaDonoPendente(wallet, nettoFinale, 3, 'PAYOUT_L3', { tipoAccount, deduzioni });
 
-  // 4. KYC CHECK — verifica prima del payout
-  const kycCheck = await kycBridge.requireKycForPayout(wallet, nettoFinale);
-  if (!kycCheck.canProceed) {
-    console.log(`   🪪 PAYOUT L3 SOSPESO — KYC non verificato per ${wallet}`);
+// 4. KYC CHECK — verifica prima del payout
+const kycCheck = await kycBridge.requireKycForPayout(wallet, nettoFinale);
+if (!kycCheck.canProceed) {
+  console.log(`   🪪 PAYOUT L3 SOSPESO — KYC non verificato per ${wallet}`);
     // Registra payout sospeso nel bridge log, ma non blocca il flusso
     await pg.queryOne(
       `INSERT INTO bridge_log (wallet, evento, netto_originale, deduzioni_totali, netto_finale, dettagli)
@@ -209,8 +213,7 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale) {
   }
 
   // 5. DONO PENDENTE: l'utente deve cliccare ACCETTA DONO (90 giorni)
-  console.log(`   🎁 DONO PENDENTE: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 90 giorni)`);
-  await giftManager.creaDonoPendente(wallet, nettoFinale, 3, 'PAYOUT_L3', { tipoAccount, deduzioni });
+
 
   // Registra nel bridge log
   await pg.queryOne(
@@ -337,6 +340,8 @@ async function hookUscitaL5(wallet, nome, nettoOriginale) {
   asyncQ.enqueue(() => queue.processaUsciteCascata(), 'cascata-fifo-l5');
 
   // KYC CHECK L5 — verifica prima del payout
+ console.log(`   🎁 DONO PENDENTE L5: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 90 giorni)`);
+  await giftManager.creaDonoPendente(wallet, nettoFinale, 5, 'PAYOUT_L5', { deduzioni });  
   const kycCheckL5 = await kycBridge.requireKycForPayout(wallet, nettoFinale);
   if (!kycCheckL5.canProceed) {
     console.log(`   🪪 PAYOUT L5 SOSPESO — KYC non verificato per ${wallet}`);
@@ -349,9 +354,7 @@ async function hookUscitaL5(wallet, nome, nettoOriginale) {
   }
 
   // DONO PENDENTE L5: l'utente deve cliccare ACCETTA DONO (90 giorni)
-  console.log(`   🎁 DONO PENDENTE L5: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 90 giorni)`);
-  await giftManager.creaDonoPendente(wallet, nettoFinale, 5, 'PAYOUT_L5', { deduzioni });
-
+ 
   await pg.queryOne(
     `INSERT INTO bridge_log (wallet, evento, netto_originale, deduzioni_totali, netto_finale, dettagli)
      VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
