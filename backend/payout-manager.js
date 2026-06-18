@@ -24,7 +24,7 @@ const USDC_ABI = [
  * @returns {{ success: boolean, txHash?: string, error?: string }}
  */
 async function inviaPagamento(destinatario, importoUsdc, motivo = '') {
-  const privKey = process.env.TREASURY_PRIVATE_KEY;
+  const privKey = process.env.PAYOUT_PRIVATE_KEY || process.env.TREASURY_PRIVATE_KEY;
   const rpcUrl  = process.env.POLYGON_RPC_URL;
 
   if (!privKey) {
