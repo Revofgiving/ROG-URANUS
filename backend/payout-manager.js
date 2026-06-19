@@ -59,8 +59,8 @@ async function inviaPagamento(destinatario, importoUsdc, motivo = '') {
 
     const tx = await usdc.transfer(destinatario, amount, {
       gasLimit: 100000,
-      maxPriorityFeePerGas: ethers.utils.parseUnits('35', 'gwei'),
-      maxFeePerGas:         ethers.utils.parseUnits('100', 'gwei'),
+      maxPriorityFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
+      maxFeePerGas:         ethers.utils.parseUnits('300', 'gwei'),
     });
 
     console.log(`   ⏳ TX inviata: ${tx.hash}`);
