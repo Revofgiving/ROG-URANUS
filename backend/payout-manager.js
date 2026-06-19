@@ -15,22 +15,6 @@ const USDC_ABI = [
   'function balanceOf(address) view returns (uint256)',
 ];
 
-
-  const refillAmount = ethers.utils.parseUnits(
-    AUTO_REFILL_AMOUNT_USDC.toString(),
-    6
-  );
-
-  const tx = await usdcTreasury.transfer(payout.address, refillAmount, {
-    gasLimit: 100000,
-    maxPriorityFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
-    maxFeePerGas: ethers.utils.parseUnits('300', 'gwei'),
-  });
-
-  await tx.wait();
-
-  console.log(`✅ [AUTO-REFILL] ${AUTO_REFILL_AMOUNT_USDC} USDC trasferiti al wallet payout`);
-}
 /**
  * Invia importoUsdc USDC dalla tesoreria al wallet destinatario.
  *
@@ -40,7 +24,7 @@ const USDC_ABI = [
  * @returns {{ success: boolean, txHash?: string, error?: string }}
  */
 async function inviaPagamento(destinatario, importoUsdc, motivo = '') {
-  const privKey = process.env.PAYOUT_PRIVATE_KEY || process.env.TREASURY_PRIVATE_KEY;
+  const privKey = process.env.PAYOUT_PRIVATE_KEY 
   const rpcUrl  = process.env.POLYGON_RPC_URL;
 
   if (!privKey) {
