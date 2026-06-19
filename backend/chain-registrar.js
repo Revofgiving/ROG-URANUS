@@ -186,8 +186,8 @@ async function registerPayout(wallet, amountUsdc, level, txHash) {
         txHashToBytes32(txHash),
         {
           gasLimit: 100000,
-          maxPriorityFeePerGas: ethers.utils.parseUnits('35', 'gwei'),
-          maxFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
+          maxPriorityFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
+          maxFeePerGas: ethers.utils.parseUnits('300', 'gwei'),
         }
       )
   );
