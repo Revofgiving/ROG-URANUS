@@ -183,7 +183,7 @@ async function processNext() {
       err.retryable ||
       err.code === 'TX_PENDING' ||
       err.code === 'RPC_ERROR' ||
-      /non trovata su Polygon|in pending|Impossibile contattare Polygon|Nessun turno attivo|Nessuna tavola aperta|watchdog in corso/i.test(err.message || '')
+    /non trovata su Polygon|in pending|Impossibile contattare Polygon|Nessun turno attivo|Nessuna tavola aperta|watchdog in corso|current transaction is aborted/i
     ));
     job.attempts = (job.attempts || 0) + 1;
 
