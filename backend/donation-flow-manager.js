@@ -218,11 +218,6 @@ async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome
     console.log(`   \u2705 Prerequisiti ROG verificati (community + ${rogStatus.rogPositions} posizioni ROG)`);
   }
 
-  // Wallet già partecipante?
-  const accountEsistente = await db.getAccount(w);
-  if (accountEsistente && accountEsistente.ticket_number && accountEsistente.tipo === 'PRIMARIO') {
-    throw new Error(`Wallet già partecipante (ticket #${accountEsistente.ticket_number}).`);
-  }
 
   let n, importoTotale;
   if (verifier.isDevSkip(txHash)) {
