@@ -380,6 +380,14 @@ console.log('🌀 Inizializzazione database SUPERURANO...');
   // Schema Hub (news, risorse, comunicazioni, testimonianze)
   await pg.query(SCHEMA_HUB_SQL);
   console.log('\u2705 Tabelle Hub (news/risorse/comunicazioni) pronte');
+  
+    // Migrazione automatica KYC
+  await pg.query(`
+    ALTER TABLE kyc_verifications
+    ADD COLUMN IF NOT EXISTS source TEXT
+  `);
+
+  console.log('✅ Migrazione kyc_verifications.source verificata');
 }
 
 // ========================================
