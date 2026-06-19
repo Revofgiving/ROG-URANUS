@@ -24,7 +24,7 @@ const USDC_ABI = [
  * @returns {{ success: boolean, txHash?: string, error?: string }}
  */
 async function inviaPagamento(destinatario, importoUsdc, motivo = '') {
-  const privKey = process.env.PAYOUT_PRIVATE_KEY 
+  const privKey = process.env.TREASURY_PRIVATE_KEY
   const rpcUrl  = process.env.POLYGON_RPC_URL;
 
   if (!privKey) {
@@ -44,8 +44,6 @@ async function inviaPagamento(destinatario, importoUsdc, motivo = '') {
     const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
     const signer   = new ethers.Wallet(privKey, provider);
     const usdc     = new ethers.Contract(USDC_CONTRACT, USDC_ABI, signer);
-    
-await autoRefillPayoutWallet(provider);
     
     // Verifica saldo tesoreria
     const balance = await usdc.balanceOf(signer.address);
