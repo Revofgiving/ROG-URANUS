@@ -76,8 +76,8 @@ const IMPORTI = {
 
   // L5 Saturno
   DONO_TOTALE_L5: 3000,
-  TRATTENUTA_CREDITI_L5: 1100,     // 110 × 10
-  USCITA_L5_NETTO: 1900,
+  TRATTENUTA_CREDITI_L5: 100,      // 10 × 10 (rivisto §10: crediti 110 → 10)
+  USCITA_L5_NETTO: 2900,           // 3000 − 100 crediti
 
   // Sacerdoti
   SACERDOTI_PRIMO_TURNO: 18,
@@ -219,7 +219,7 @@ function calcolaUscitaLivello(livello, tipoAccount, doniRicevuti) {
       const netto = doniRicevuti - crediti;
       return {
         livello: 5, tipoAccount, doniRicevuti,
-        trattenutaCrediti: crediti, numCrediti: 110,
+        trattenutaCrediti: crediti, numCrediti: 10,
         netto, uscitaDefinitiva: true
       };
     }

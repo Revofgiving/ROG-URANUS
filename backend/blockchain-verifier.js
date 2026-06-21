@@ -27,7 +27,9 @@ const ERC20_ABI = [
 // URANUS accetta donazioni in USDC e XAUt0 (Tether Gold) su Polygon
 const ACCEPTED_TOKENS = {
   USDC: {
-    address: (process.env.USDC_CONTRACT_ADDRESS || '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359').toLowerCase(),
+    // USDC.e bridged — DEVE coincidere col token del contratto ROG distribuito
+    // (ROGTreasuryController.USDC_ADDRESS, constant immutabile) e col token inviato dal frontend.
+    address: (process.env.USDC_CONTRACT_ADDRESS || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174').toLowerCase(),
     decimals: 6,
     symbol: 'USDC',
     minDonation: 20,  // 20 USDC minimo
@@ -36,7 +38,7 @@ const ACCEPTED_TOKENS = {
     address: (process.env.XAUT0_CONTRACT_ADDRESS || '0xF1815bd50389c46847f0Bda824eC8da914045D14').toLowerCase(),
     decimals: 6,
     symbol: 'XAUt0',
-    minDonation: 0.004,  // ~20 USD in oro (~0.004 oz a ~$5.000/oz)
+    minDonation: 0.005,  // 20 USD in oro = 0,005 oz a 4.000 $/oz (GOLD_PRICE_USD)
   },
 };
 

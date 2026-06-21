@@ -8,7 +8,7 @@
 #   4. Coolify builda e deploya automaticamente ad ogni push
 # ============================================================
 
-FROM node:18-alpine
+FROM node:20-alpine
 
 # Metadata
 LABEL maintainer="URANO"

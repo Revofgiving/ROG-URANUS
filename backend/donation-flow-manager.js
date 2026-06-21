@@ -113,7 +113,7 @@ async function inizializzaSistema() {
 // INGRESSO SACERDOTE NEL BLOCCO 1
 // ========================================
 
-async function posizionaSacerdoteInUrano(wallet, nome) {
+async function posizionaSacerdoteInUrano(wallet, nome, chiaveSdoppiamentoSole = null) {
   const pg = require('./pg-connection-manager');
   const turno = await db.getTurnoCorrente('URANO', 1);
   if (!turno) {
@@ -167,7 +167,7 @@ async function posizionaSacerdoteInUrano(wallet, nome) {
   // annulla solo questo passo senza compromettere l'intera transazione.
   try {
     const pgConn = require('./pg-connection-manager');
-    await pgConn.savepoint(() => predisposizione.calcolaPredisposizione(wallet, turno.numero_turno, entrati, turno.faraone_wallet));
+    await pgConn.savepoint(() => predisposizione.calcolaPredisposizione(wallet, turno.numero_turno, entrati, turno.faraone_wallet, chiaveSdoppiamentoSole));
   } catch (e) { console.log(`   ⚠️  Predisposizione non calcolata: ${e.message}`); }
 
   // Progressioni
@@ -282,6 +282,104 @@ async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome
   };
 }
 
+/**
+ * Piazza UNA singola coppia (CASSA + HUMAN) di una donazione, per l'ALTERNANZA SOLIDALE.
+ * Alla PRIMA coppia esegue il setup completo: gate ROG, verifica tx on-chain,
+ * account/ticket, createDonazione (anti-replay). Le coppie successive: solo piazzamento.
+ *
+ * Lo `state` è mantenuto dal chiamante (donation-queue) tra una coppia e l'altra:
+ *   { setupDone, n, importoTotale, token, ticket, placed, numeroPosizioni }
+ *
+ * DURABILITÀ: il progresso (setup_done, total_coppie, placed_coppie) è persistito in
+ * donation_queue DENTRO la stessa transazione del piazzamento (atomico). In caso di
+ * crash/riavvio, recoverIncompleteJobs() riprende esattamente dalle coppie mancanti
+ * senza ri-verificare la tx (no doppio anti-replay, nessuna coppia persa/duplicata).
+ *
+ * @returns {{ state, done, placed, total, ticket }}
+ */
+async function processaCoppiaEntrata({ wallet, txHash, nome, state, jobId = null }) {
+  await db.initDatabase();
+  if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet)) throw new Error('Wallet non valido');
+  if (!txHash) throw new Error('txHash obbligatorio');
+
+  const w = wallet.toLowerCase();
+  const nomeEff = (nome || '').trim() || `${w.substring(0, 8)}...`;
+  const pg = require('./pg-connection-manager');
+  state = state || {};
+
+  if (!state.setupDone) {
+    // GATE ROG (identico a processaDonoEntrataWallet)
+    if (!verifier.isDevSkip(txHash)) {
+      const rogStatus = await rogChecker.checkAllPrerequisites(w);
+      if (!rogStatus.canProceed) {
+        const motivi = [];
+        if (!rogStatus.communityRegistered) motivi.push('non iscritto alla community ROG');
+        if (!rogStatus.rogDonationDone) motivi.push('nessuna donazione ROG completata');
+        throw new Error(`Prerequisiti ROG non soddisfatti: ${motivi.join(', ')}. Completa prima il percorso ROG.`);
+      }
+    }
+
+    // Verifica importo / numero coppie (una sola volta)
+    if (verifier.isDevSkip(txHash)) {
+      state.n = Math.max(1, Math.floor(Number(state.numeroPosizioni) || 1));
+      state.importoTotale = rules.IMPORTI.COSTO_PER_PERSONA * state.n;
+      state.token = 'USDC';
+    } else {
+      const verifica = await verifier.verificaDonazione({ txHash, walletMittente: w, importoMinimo: rules.IMPORTI.COSTO_PER_PERSONA });
+      state.importoTotale = verifica.importoEffettivo;
+      state.n = Math.max(1, Number(verifica.numeroPosizioni) || 1);
+      state.token = verifica.token || 'USDC';
+    }
+
+    // Setup + PRIMA coppia (atomico)
+    const out = await pg.transaction(async () => {
+      let account = await db.getAccount(w);
+      if (!account) account = await db.createAccount({ wallet: w, nome: nomeEff, tipo: 'PRIMARIO' });
+      if (!account.ticket_number) account = await db.assignTicket(w);
+
+      const rCassa = await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
+      await posizionaDonatoreEntrata(w, nomeEff);
+
+      if (!verifier.isDevSkip(txHash)) {
+        await db.createDonazione({
+          donorWallet: w, importo: state.importoTotale, txHash,
+          destinatarioWallet: TREASURY_WALLET,
+          tavolaId: rCassa.tavolaId, livello: 0, turno: rCassa.turno,
+        });
+      }
+      // Progresso persistito ATOMICAMENTE con setup + coppia 1 (durabilità anti-crash).
+      if (jobId) {
+        await pg.query(
+          `UPDATE donation_queue SET setup_done = TRUE, total_coppie = $1, placed_coppie = 1, status = 'PROCESSING' WHERE id = $2`,
+          [state.n, jobId]
+        );
+      }
+      return { account };
+    });
+
+    if (!verifier.isDevSkip(txHash)) chainRegistrar.registerDonation(w, state.importoTotale, txHash);
+
+    state.ticket = out.account.ticket_number;
+    state.setupDone = true;
+    state.placed = 1;
+    console.log(`\ud83c\udf00 [Alternanza] Setup + coppia 1/${state.n} — ${w.substring(0, 10)} ticket=${state.ticket}`);
+  } else {
+    // Coppia successiva: solo piazzamento (CASSA + HUMAN), progresso persistito ATOMICAMENTE.
+    const newPlaced = (state.placed || 0) + 1;
+    await pg.transaction(async () => {
+      await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
+      await posizionaDonatoreEntrata(w, nomeEff);
+      if (jobId) {
+        await pg.query(`UPDATE donation_queue SET placed_coppie = $1 WHERE id = $2`, [newPlaced, jobId]);
+      }
+    });
+    state.placed = newPlaced;
+    console.log(`\ud83c\udf00 [Alternanza] Coppia ${state.placed}/${state.n} — ${w.substring(0, 10)}`);
+  }
+
+  return { state, done: state.placed >= state.n, placed: state.placed, total: state.n, ticket: state.ticket };
+}
+
 // ========================================
 // POSIZIONAMENTO L0
 // ========================================
@@ -394,6 +492,17 @@ async function posizionaDonatoreEntrata(wallet, nome) {
   });
   await db.incrementSacerdotiEntrati(turno.id);
 
+  // 🔮 PRENOTAZIONE FUNZIONI AL MOMENTO DELL'INGRESSO (Sole L0):
+  // ogni "numero" che entra ottiene SUBITO la sua scheda di predisposizione,
+  // agganciata alla PROPRIA tavola di sdoppiamento Sole (chiave stabile fino alla
+  // graduazione). Best-effort in savepoint: un errore qui non compromette il dono.
+  if (r.tavolaSdoppiamento?.numero) {
+    try {
+      const pgConn = require('./pg-connection-manager');
+      await pgConn.savepoint(() => predisposizione.prenotaIngressoSole(wallet, r.tavolaSdoppiamento.numero, turno.numero_turno));
+    } catch (e) { console.log(`   ⚠\ufe0f  Prenotazione ingresso Sole non calcolata: ${e.message}`); }
+  }
+
   if (r.tavolaCompleta) {
     const eredeWallet  = tavola.faraone_wallet;
     const eredeAccount = await db.getAccount(eredeWallet);
@@ -427,7 +536,7 @@ async function posizionaDonatoreEntrata(wallet, nome) {
     // lasciando la transazione principale attiva e funzionante.
     try {
       const pgConn = require('./pg-connection-manager');
-      await pgConn.savepoint(() => posizionaSacerdoteInUrano(eredeWallet, nomeErede));
+      await pgConn.savepoint(() => posizionaSacerdoteInUrano(eredeWallet, nomeErede, tavola.numero));
     } catch (sacerdoteErr) {
       console.error(`⚠️ [ENTRATA] Sacerdote non posizionato in URANO (savepoint rollback): ${sacerdoteErr.message}`);
       console.error(`   avviaNuovoTurnoEntrata procede comunque.`);
@@ -623,6 +732,14 @@ async function gestisciUscitaL4(turno) {
   });
   await db.completaTurno(turno.id, doniRicevuti);
   await avviaNextTurnoL4(turno);
+
+  // 🎁 Dono pendente Giove (L4): l'utente lo ritira via ACCETTA DONO (gate fondi in cassa).
+  // L4 è sempre Secondario (PERPETUO/GEMELLO): nessun auto-pay FONDO.
+  try {
+    const giftManager = require('./gift-manager');
+    await giftManager.creaDonoPendente(faraoneWallet, uscita.netto, 4, 'PAYOUT_L4', { tipoAccount });
+  } catch (e) { console.error(`⚠️  [L4] creaDonoPendente: ${e.message}`); }
+
   await posizionaFaraoneInL5(faraoneWallet, account?.nome || faraoneWallet.substring(0, 10));
   return { uscita };
 }
@@ -963,6 +1080,7 @@ if (!rogStatus.canProceed) {
 module.exports = {
   inizializzaSistema,
   processaDonoEntrataWallet,
+  processaCoppiaEntrata,
   posizionaDonatoreEntrata,
   posizionaDonatoreEntrataCross,
   gestisciUscitaFaraone,

@@ -133,9 +133,9 @@ async function rilasciaFunzioniL4({ faraoneWallet, turnoCorrente }) {
 
 async function rilasciaFunzioniL5({ faraoneWallet, turnoCorrente }) {
   console.log(`\n⚙️ RILASCIO FUNZIONI L5 per ${faraoneWallet.substring(0, 10)}...`);
-  const crediti = await containerManager.accantonaDoniCredito(110, faraoneWallet, 5, turnoCorrente);
-  console.log(`   ✅ 110 doni a credito rilasciati (1.100 USDC) → contenitore 5.3`);
-  return { crediti, numCrediti: 110, importoTotale: 1100 };
+  const crediti = await containerManager.accantonaDoniCredito(10, faraoneWallet, 5, turnoCorrente);
+  console.log(`   ✅ 10 doni a credito rilasciati (100 USDC) → contenitore 5.3`);
+  return { crediti, numCrediti: 10, importoTotale: 100 };
 }
 
 // ========================================

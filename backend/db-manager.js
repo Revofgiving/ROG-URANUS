@@ -252,9 +252,10 @@ CREATE TABLE IF NOT EXISTS bridge_log (
 );
 
 -- Predisposizioni (pre-mappatura deterministica tavole e funzioni)
+-- Chiave PER-INGRESSO: ogni posizione (tavola di sdoppiamento) ha il proprio percorso futuro.
 CREATE TABLE IF NOT EXISTS predisposizioni (
   id                     SERIAL PRIMARY KEY,
-  wallet                 TEXT NOT NULL UNIQUE,
+  wallet                 TEXT NOT NULL,
   turno_corrente         INTEGER,
   turno_previsto         INTEGER,
   tavola_sdoppiamento_num INTEGER,
@@ -266,7 +267,8 @@ CREATE TABLE IF NOT EXISTS predisposizioni (
   struttura_turno        JSONB,
   riepilogo_economico    JSONB,
   created_at             TIMESTAMPTZ DEFAULT NOW(),
-  updated_at             TIMESTAMPTZ DEFAULT NOW()
+  updated_at             TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(wallet, tavola_sdoppiamento_num)
 );
 
 -- Coda FIFO crediti (lista di attesa per distribuzione doni a credito)
@@ -388,6 +390,20 @@ console.log('🌀 Inizializzazione database SUPERURANO...');
   `);
 
   console.log('✅ Migrazione kyc_verifications.source verificata');
+
+  // Migrazione predisposizioni: da chiave per-wallet a PER-INGRESSO (wallet + tavola_sdoppiamento)
+  // cos\u00ec ogni posizione del wallet ha un proprio percorso futuro (come ROG small/medium/large).
+  try {
+    await pg.query(`ALTER TABLE predisposizioni DROP CONSTRAINT IF EXISTS predisposizioni_wallet_key`);
+    await pg.query(`DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'predisposizioni_wallet_sdopp_key') THEN
+        ALTER TABLE predisposizioni ADD CONSTRAINT predisposizioni_wallet_sdopp_key UNIQUE (wallet, tavola_sdoppiamento_num);
+      END IF;
+    END $$;`);
+    console.log('\u2705 Migrazione predisposizioni per-ingresso verificata');
+  } catch (e) {
+    console.error('\u26a0\ufe0f Migrazione predisposizioni fallita:', e.message);
+  }
 }
 
 // ========================================

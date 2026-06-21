@@ -40,7 +40,7 @@ const rules = require('./rules-engine');
  * @param {string} faraoneWallet - Wallet del Faraone corrente del turno
  * @returns {Object} Predisposizione calcolata
  */
-async function calcolaPredisposizione(wallet, turnoCorrente, sacerdotiEntrati, faraoneWallet) {
+async function calcolaPredisposizione(wallet, turnoCorrente, sacerdotiEntrati, faraoneWallet, chiaveSdoppiamentoOverride = null) {
   const w = wallet.toLowerCase();
 
   // Il sacerdote che entra ora occupa la posizione sacerdotiEntrati
@@ -59,14 +59,19 @@ async function calcolaPredisposizione(wallet, turnoCorrente, sacerdotiEntrati, f
     [w]
   );
 
-  const tavolaSdoppiamentoNum = sdoppiamento?.numero || null;
+  const l1SdoppiamentoNum = sdoppiamento?.numero || null;
+  // Chiave della scheda. Se fornita (graduazione da Sole), usa la tavola di
+  // sdoppiamento Sole L0 — chiave STABILE dall'ingresso fino alla graduazione —
+  // così AGGIORNA la scheda preliminare creata all'ingresso (una sola scheda per
+  // posizione, nessun doppione). Altrimenti usa la tavola di sdoppiamento del Blocco 1.
+  const tavolaSdoppiamentoNum = chiaveSdoppiamentoOverride || l1SdoppiamentoNum;
 
   // Conta quante tavole di sdoppiamento (futuri Faraoni) ci sono prima di questa
   const { cnt: posizioneCoda } = await pg.queryOne(
     `SELECT COUNT(*) AS cnt FROM tavole
      WHERE tipo = 'SDOPPIAMENTO' AND status = 'APERTA' AND livello IN (1,2,3)
        AND numero <= $1`,
-    [tavolaSdoppiamentoNum || 999999]
+    [l1SdoppiamentoNum || 999999]
   );
 
   // Turno previsto = turno corrente + posizione nella coda dei Faraoni
@@ -170,6 +175,92 @@ async function calcolaPredisposizione(wallet, turnoCorrente, sacerdotiEntrati, f
 }
 
 // ========================================
+// PRENOTAZIONE ALL'INGRESSO (Sole L0)
+// ========================================
+
+/**
+ * 🔮 Prenotazione funzioni AL MOMENTO DELL'INGRESSO (dono a Sole L0).
+ *
+ * Come da specifica ("dal momento in cui entra il numero zero avrà le sue funzioni
+ * prenotate ..."): ad ogni ingresso a Sole, ogni posizione ("numero") ottiene SUBITO
+ * la propria scheda di predisposizione, agganciata alla sua tavola di sdoppiamento
+ * Sole L0 (chiave STABILE). Le posizioni delle Funzioni (SIM/PERP/GEM) sono
+ * DETERMINISTICHE; il turno è STIMATO e verrà raffinato da calcolaPredisposizione
+ * quando la posizione si diploma nel Blocco 1 (stessa chiave → una sola scheda).
+ *
+ * @param {string} wallet
+ * @param {number} tavolaSdoppiamentoSoleNum - numero della tavola di sdoppiamento Sole L0
+ * @param {number} turnoEntrataCorrente - turno ENTRATA corrente
+ */
+async function prenotaIngressoSole(wallet, tavolaSdoppiamentoSoleNum, turnoEntrataCorrente) {
+  if (!tavolaSdoppiamentoSoleNum) return null;
+  const w = wallet.toLowerCase();
+
+  // Stima del turno di graduazione: quante tavole Sole L0 ancora aperte hanno
+  // numero <= la nostra (proxy della posizione nella coda di promozione Sole).
+  const row = await pg.queryOne(
+    `SELECT COUNT(*) AS cnt FROM tavole
+     WHERE livello = 0 AND status = 'APERTA' AND tipo IN ('SDOPPIAMENTO','PERCORSO')
+       AND numero <= $1`,
+    [tavolaSdoppiamentoSoleNum]
+  );
+  const codaSole = Number(row?.cnt) || 1;
+  const turnoPrevistoStimato = Number(turnoEntrataCorrente || 1) + codaSole;
+
+  const sacerdotiNecessari = turnoPrevistoStimato === 1
+    ? rules.IMPORTI.SACERDOTI_PRIMO_TURNO
+    : rules.IMPORTI.SACERDOTI_DAL_SECONDO;
+
+  // Posizioni Funzioni: DETERMINISTICHE (indipendenti dal turno) — già "prenotate".
+  const funzioniPreviste = {
+    simbionti: [
+      { livello: 2, nome: 'Mercurio', tavolaRelativa: 1, posizione: 1, tipo: 'SIMBIONTE', sdoppiabile: false },
+      { livello: 2, nome: 'Mercurio', tavolaRelativa: 1, posizione: 2, tipo: 'SIMBIONTE', sdoppiabile: false },
+      { livello: 2, nome: 'Mercurio', tavolaRelativa: 2, posizione: 1, tipo: 'SIMBIONTE', sdoppiabile: false },
+    ],
+    perpetuo: {
+      livello: 2, nome: 'Mercurio', tavolaRelativa: 2, posizione: 2,
+      tipo: 'PERPETUO', sdoppiabile: true, siglaFormula: '<sigla_faraone>.N'
+    },
+    gemello: {
+      livello: 3, nome: 'Venere', tavolaRelativa: 7, posizione: 2,
+      tipo: 'GEMELLO', sdoppiabile: true,
+      ticketFormula: '26 + (ordine_globale - 1) × 14', siglaFormula: 'N-<sigla_faraone>'
+    },
+    crediti: { numero: 5, importoUnitario: 10, totale: 50, destinazione: 'contenitore 5.3' }
+  };
+
+  const pred = {
+    wallet: w,
+    turnoCorrente: Number(turnoEntrataCorrente || 1),
+    tavolaSdoppiamentoNum: tavolaSdoppiamentoSoleNum,
+    posizioneCodaFaraoni: codaSole,
+    turnoPrevisto: turnoPrevistoStimato,
+    sacerdotiNecessari,
+    personeNuoveNecessarie: sacerdotiNecessari === 18 ? 57 : 39,
+    haFunzioni: turnoPrevistoStimato > 1,
+    funzioniPreviste: turnoPrevistoStimato > 1 ? funzioniPreviste : null,
+    strutturaTurno: {
+      preliminare: true,
+      origine: 'INGRESSO_SOLE_L0',
+      nota: 'Prenotazione creata al momento dell\'ingresso a Sole. Turno STIMATO: verrà raffinato quando la posizione entra nel Blocco 1.'
+    },
+    riepilogoEconomico: {
+      lordoL3: rules.IMPORTI.DONO_TOTALE_L3,
+      accantonamentoRestituito: rules.IMPORTI.ACCANTONAMENTO_RESTITUITO,
+      lordoEffettivo: rules.IMPORTI.DONO_TOTALE_L3_EFFETTIVO,
+      cassaL3: rules.IMPORTI.TRATTENUTA_CASSA_L3,
+      nettoPrimario: rules.IMPORTI.USCITA_L3_PRIMARIO,
+      nettoSecondario: rules.IMPORTI.USCITA_L3_SECONDARIO,
+    }
+  };
+
+  await salvaPredisposizione(pred);
+  console.log(`   🔮 Prenotazione INGRESSO Sole: ${w.substring(0, 12)}... (tavola sdopp. #${tavolaSdoppiamentoSoleNum}, turno stimato ${turnoPrevistoStimato})`);
+  return pred;
+}
+
+// ========================================
 // PERSISTENZA
 // ========================================
 
@@ -181,7 +272,7 @@ async function salvaPredisposizione(pred) {
         posizione_coda, sacerdoti_necessari, persone_nuove,
         ha_funzioni, funzioni_previste, struttura_turno, riepilogo_economico)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-     ON CONFLICT (wallet) DO UPDATE SET
+     ON CONFLICT (wallet, tavola_sdoppiamento_num) DO UPDATE SET
        turno_corrente = EXCLUDED.turno_corrente,
        turno_previsto = EXCLUDED.turno_previsto,
        tavola_sdoppiamento_num = EXCLUDED.tavola_sdoppiamento_num,
@@ -212,8 +303,18 @@ async function salvaPredisposizione(pred) {
 
 async function getPredisposizione(wallet) {
   await db.initDatabase();
+  // Legacy/single: ritorna la predisposizione più recente del wallet.
   return await pg.queryOne(
-    'SELECT * FROM predisposizioni WHERE wallet = $1',
+    'SELECT * FROM predisposizioni WHERE wallet = $1 ORDER BY id DESC LIMIT 1',
+    [wallet.toLowerCase()]
+  );
+}
+
+// Per-ingresso: TUTTE le predisposizioni del wallet (una per posizione/tavola di sdoppiamento).
+async function getPredisposizioniByWallet(wallet) {
+  await db.initDatabase();
+  return await pg.queryMany(
+    'SELECT * FROM predisposizioni WHERE wallet = $1 ORDER BY turno_previsto ASC, id ASC',
     [wallet.toLowerCase()]
   );
 }
@@ -351,9 +452,18 @@ async function calcolaPredisposizioneNettuno(wallet) {
       messaggio: mancanti === 0
         ? `✅ Puoi uscire! Lordo: 1.080 USDC → 800 USDC in wallet`
         : `Mancano ${mancanti} posizioni su ${SLOTS} per uscire`,
-      payoutAtteso: pos.tipo === 'HUMAN'
+      payoutAtteso: String(pos.tipo).startsWith('HUMAN')
         ? { wallet: 800, pharaoh: 100, rogSmall: 60, soleL0: 40 }
         : { accantonamento: 700 },
+      // 🔮 PREDESTINAZIONE VISIVA dei rientri futuri (solo informativa).
+      // Ogni posizione, AL momento dell'uscita, rigenera rientri perpetui:
+      //   HUMAN → 6 | CASSA → 18. Questi NON esistono ancora e NON contano
+      //   per la soglia 108 finché non vengono effettivamente generati.
+      rientriFuturiPrevisti: {
+        numero: String(pos.tipo).startsWith('HUMAN') ? 6 : 18,
+        generazioneProssima: (Number(pos.generazione) || 0) + 1,
+        nota: 'Generati automaticamente all\'uscita (perpetui). Predestinazione visiva: non contano per la soglia 108 finché non esistono.',
+      },
     };
   }));
 
@@ -379,6 +489,8 @@ async function calcolaPredisposizioneNettuno(wallet) {
       rientri_pool,
       totalePosizioniFIFO: totalePosizioni,
       totaleUsciteSistema: totaleUscite,
+      // 🔮 Totale rientri futuri previsti (predestinazione visiva, non ancora in coda)
+      rientriFuturiPrevistiTotali: risultati.reduce((s, r) => s + (r.rientriFuturiPrevisti?.numero || 0), 0),
       primaPosizioneUtile: primaUscita
         ? { posizione: primaUscita.posizione, mancanti: primaUscita.posizioniMancanti, perc: primaUscita.percCompletamento }
         : null,
@@ -399,11 +511,24 @@ async function calcolaPredisposizioneNettuno(wallet) {
 async function calcolaPredisposizioneCompleta(wallet) {
   const w = wallet.toLowerCase();
 
-  const [sole, nettuno, blocco1] = await Promise.all([
+  const [sole, nettuno, blocco1List] = await Promise.all([
     calcolaPredisposizioneSole(w),
     calcolaPredisposizioneNettuno(w),
-    getPredisposizione(w),
+    getPredisposizioniByWallet(w),
   ]);
+
+  // Blocco 1 PER-INGRESSO: ogni posizione (tavola di sdoppiamento) ha il proprio percorso.
+  const blocco1 = (blocco1List || []).map(b => ({
+    tavolaSdoppiamento: b.tavola_sdoppiamento_num,
+    turnoPrevisto: b.turno_previsto,
+    posizioneCoda: b.posizione_coda,
+    sacerdotiNecessari: b.sacerdoti_necessari,
+    personeNuoveNecessarie: b.persone_nuove,
+    haFunzioni: b.ha_funzioni,
+    funzioniPreviste: b.funzioni_previste,
+    riepilogoEconomico: b.riepilogo_economico,
+    messaggio: `Posizione (tavola sdoppiamento #${b.tavola_sdoppiamento_num ?? '?'}): diventerai Uranus al turno #${b.turno_previsto} (sei ${b.posizione_coda}° in coda Blocco 1)`,
+  }));
 
   return {
     wallet: w,
@@ -414,16 +539,8 @@ async function calcolaPredisposizioneCompleta(wallet) {
         ? 'Nessuna tavola Sole aperta con tue posizioni'
         : `Sei presente in ${sole.length} tavola/e Sole`,
     },
-    blocco1: blocco1 ? {
-      turnoPrevisto: blocco1.turno_previsto,
-      posizioneCoda: blocco1.posizione_coda,
-      sacerdotiNecessari: blocco1.sacerdoti_necessari,
-      personeNuoveNecessarie: blocco1.persone_nuove,
-      haFunzioni: blocco1.ha_funzioni,
-      funzioniPreviste: blocco1.funzioni_previste,
-      riepilogoEconomico: blocco1.riepilogo_economico,
-      messaggio: `Diventerai Faraone al turno #${blocco1.turno_previsto} (sei ${blocco1.posizione_coda}° in coda Blocco 1)`,
-    } : { messaggio: 'Non ancora entrato nel Blocco 1' },
+    blocco1,
+    blocco1Count: blocco1.length,
     nettuno,
     riepilogoPayout: {
       incassatiFinora: null, // calcolato dal frontend con storico_avanzamenti
@@ -438,10 +555,12 @@ async function calcolaPredisposizioneCompleta(wallet) {
 
 module.exports = {
   calcolaPredisposizione,
+  prenotaIngressoSole,
   calcolaPredisposizioneSole,
   calcolaPredisposizioneNettuno,
   calcolaPredisposizioneCompleta,
   getPredisposizione,
+  getPredisposizioniByWallet,
   getPredisposizioniPerTurno,
   getStatoPredisposizioni,
 };

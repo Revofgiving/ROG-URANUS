@@ -9,7 +9,9 @@
  * In assenza della chiave, logga un warning ma non blocca il flusso.
  */
 
-const USDC_CONTRACT  = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // Polygon USDC
+// USDC.e bridged — DEVE coincidere col token del contratto ROG distribuito (constant immutabile).
+// Override via env USDC_CONTRACT_ADDRESS.
+const USDC_CONTRACT  = process.env.USDC_CONTRACT_ADDRESS || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // Polygon USDC.e
 const USDC_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
   'function balanceOf(address) view returns (uint256)',
@@ -75,4 +77,28 @@ async function inviaPagamento(destinatario, importoUsdc, motivo = '') {
   }
 }
 
-module.exports = { inviaPagamento };
+/**
+ * Legge il saldo USDC del wallet che ESEGUE i payout (tesoreria/cassa URANUS,
+ * derivato da TREASURY_PRIVATE_KEY — lo stesso su cui inviaPagamento verifica il
+ * balanceOf prima del transfer). È la fonte autorevole per stabilire se un dono
+ * è "pronto" da distribuire (fondi già presenti in cassa).
+ * @returns {Promise<number|null>} saldo in USDC, oppure null se non leggibile.
+ */
+async function getSaldoTreasury() {
+  const privKey = process.env.TREASURY_PRIVATE_KEY;
+  const rpcUrl  = process.env.POLYGON_RPC_URL;
+  if (!privKey || !rpcUrl) return null;
+  try {
+    const { ethers } = require('ethers');
+    const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+    const signer   = new ethers.Wallet(privKey, provider);
+    const usdc     = new ethers.Contract(USDC_CONTRACT, USDC_ABI, provider);
+    const balance  = await usdc.balanceOf(signer.address);
+    return Number(ethers.utils.formatUnits(balance, 6));
+  } catch (err) {
+    console.warn(`⚠️  [PAYOUT] getSaldoTreasury fallito: ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = { inviaPagamento, getSaldoTreasury };

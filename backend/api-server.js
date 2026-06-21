@@ -441,9 +441,16 @@ app.get('/api/predisposizione/:wallet', async (req, res) => {
   const wallet = req.params.wallet?.toLowerCase();
   if (!wallet) return res.status(400).json({ error: 'wallet obbligatorio' });
   try {
-    const pred = await predisposizione.getPredisposizione(wallet);
-    if (!pred) return res.status(404).json({ success: false, error: 'Nessuna predisposizione trovata' });
-    res.json({ success: true, predisposizione: pred });
+    // PER-INGRESSO: una predisposizione per ogni posizione del wallet (tavola di sdoppiamento).
+    const predisposizioni = await predisposizione.getPredisposizioniByWallet(wallet);
+    if (!predisposizioni.length) return res.status(404).json({ success: false, error: 'Nessuna predisposizione trovata' });
+    res.json({
+      success: true,
+      predisposizioni,
+      count: predisposizioni.length,
+      // Retrocompatibilità: la più recente come oggetto singolo.
+      predisposizione: predisposizioni[predisposizioni.length - 1],
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1084,7 +1091,8 @@ app.post('/api/admin/invia-payout', async (req, res) => {
 
   const USDC_ABI = ['function transfer(address to, uint256 amount) returns (bool)',
                     'function balanceOf(address) view returns (uint256)'];
-  const USDC_ADDR = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
+  // USDC.e bridged — stesso token del contratto ROG distribuito e della cassa Uranus.
+  const USDC_ADDR = process.env.USDC_CONTRACT_ADDRESS || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
 
   let lastError = null;
 
@@ -1218,6 +1226,9 @@ app.listen(PORT, async () => {
   console.log(`   Percorso: L0(Sole)→L1(Luna)→L2(Mercurio)→L3(Venere)→L4(Giove)→L5(Saturno) → Nettuno(FIFO) → Uranus\n`);
   try { await db.initDatabase(); } catch (err) { console.error('\u274c DB:', err.message); }
   try { await donationQueue.initQueueTable(); } catch (err) { console.error('\u274c DonationQueue:', err.message); }
+  // ♻️ Recovery: riprende donazioni multi-coppia interrotte da un riavvio/crash
+  // (le coppie già piazzate sono persistite; vengono piazzate solo le restanti).
+  try { await donationQueue.recoverIncompleteJobs(); } catch (err) { console.error('\u274c DonationQueue recovery:', err.message); }
   // 🔧 WATCHDOG AUTOMATICO: ogni 60 secondi verifica e ripara il turno ENTRATA.
   // Il sistema non richiede più alcun intervento manuale.
   setInterval(async () => {

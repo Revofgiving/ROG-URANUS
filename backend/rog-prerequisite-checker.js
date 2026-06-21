@@ -20,6 +20,18 @@ const ROG_BACKEND_URL = (process.env.ROG_BACKEND_URL || '').replace(/\/+$/, '');
 // Posizione minima ROG per accedere a URANUS (corrispondente all'8 giugno 2026)
 const POSIZIONE_MINIMA_ROG = 20488;
 
+// ── Parametri verifica ON-CHAIN (doppia garanzia: donazione ROG Small ≥ 2 USDC alla cassa) ──
+// Wallet cassa ROG: destinatario delle donazioni ROG Small.
+const ROG_CASSA_WALLET = (process.env.ROG_WALLET_CASSA || process.env.ROG_WALLET_ADDRESS || '0xd5bcc7acc9d6862c784807134c1f70c3e7f9f790').toLowerCase();
+// USDC usato da ROG (contratto distribuito ROGTreasuryController.USDC_ADDRESS, constant immutabile)
+// = USDC.e bridged. DEVE coincidere col token ROG, altrimenti il check on-chain non vede le donazioni.
+// Override via env USDC_CONTRACT_ADDRESS.
+const USDC_CONTRACT = (process.env.USDC_CONTRACT_ADDRESS || '0x2791bca1f2de4661ed88a30c99a7a9449aa84174').toLowerCase();
+// Blocco Polygon di riferimento (8 giugno 2026). Impostare ROG_BLOCK_8_GIUGNO (hex) per efficienza/precisione;
+// default '0x0' = scansione completa (fallback robusto). Richiede un endpoint Alchemy in POLYGON_RPC_URL
+// (il metodo alchemy_getAssetTransfers è specifico di Alchemy).
+const BLOCK_8_GIUGNO = process.env.ROG_BLOCK_8_GIUGNO || '0x0';
+
 // ════════════════════════════════════════════════════════════════════
 // HTTP HELPER
 // ════════════════════════════════════════════════════════════════════
@@ -201,30 +213,42 @@ async function checkAllPrerequisites(wallet) {
 
   console.log(`🔐 [ROG-Check] Verifica prerequisiti ROG per ${w}...`);
 
-  // Verifiche in parallelo:
+  // Verifiche in parallelo (DOPPIA GARANZIA sulla donazione):
   // 1. Iscrizione community ROG
   // 2. Almeno 1 posizione ROG con numero >= 20488 (dall'8 giugno 2026)
-  const [communityResult, donationResult] = await Promise.all([
+  // 3. Conferma ON-CHAIN: >= 2 USDC inviati alla cassa ROG su Polygon
+  const [communityResult, donationResult, onChainResult] = await Promise.all([
     checkCommunityRegistration(w),
     checkRogDonation(w),
+    checkRecentRogDonationOnChain(w),
   ]);
+
+  // La donazione è verificata se confermata da ALMENO una delle due fonti indipendenti:
+  //  - posizione ROG >= 20488 (ROG ha già verificato la tx on-chain prima di crearla), OPPURE
+  //  - conferma on-chain diretta (>= 2 USDC alla cassa ROG).
+  // Doppia garanzia: due percorsi indipendenti, maggiore robustezza e nessun blocco
+  // se uno dei due è temporaneamente non disponibile.
+  const donationVerified = donationResult.hasDonation || onChainResult.hasRecentDonation;
 
   const errors = [];
   if (!communityResult.registered) {
     errors.push(communityResult.error || 'Non iscritto alla community ROG');
   }
-  if (!donationResult.hasDonation) {
-    errors.push(donationResult.error || `Nessuna posizione ROG >= ${POSIZIONE_MINIMA_ROG} (donazione dell'8 giugno 2026 o successiva)`);
+  if (!donationVerified) {
+    errors.push(donationResult.error || `Nessuna donazione ROG Small >= 2 USDC verificata (posizione >= ${POSIZIONE_MINIMA_ROG} o conferma on-chain)`);
   }
 
-  const canProceed = communityResult.registered && donationResult.hasDonation;
+  const canProceed = communityResult.registered && donationVerified;
 
-  console.log(`🔐 [ROG-Check] Community: ${communityResult.registered ? '✅' : '❌'} | Posizione >= ${POSIZIONE_MINIMA_ROG}: ${donationResult.hasDonation ? '✅' : '❌'} | Accesso: ${canProceed ? '✅ OK' : '❌ BLOCCATO'}`);
+  console.log(`🔐 [ROG-Check] Community: ${communityResult.registered ? '✅' : '❌'} | Posizione >= ${POSIZIONE_MINIMA_ROG}: ${donationResult.hasDonation ? '✅' : '❌'} | On-chain >= 2 USDC: ${onChainResult.hasRecentDonation ? '✅' : '❌'} | Accesso: ${canProceed ? '✅ OK' : '❌ BLOCCATO'}`);
 
   return {
     canProceed,
     communityRegistered: communityResult.registered,
-    rogDonationDone: donationResult.hasDonation,
+    rogDonationDone: donationVerified,
+    rogDonationViaPosition: donationResult.hasDonation,
+    rogDonationViaOnChain: onChainResult.hasRecentDonation,
+    onChainTx: onChainResult.latestTx || null,
     rogPositions: donationResult.totalPositions || 0,
     hasQualifyingPosition: donationResult.hasQualifyingPosition || false,
     posizioneMinima: POSIZIONE_MINIMA_ROG,
@@ -299,6 +323,7 @@ async function registerDonationOnRog({ donationId, donor, amount, txHash }) {
 module.exports = {
   checkCommunityRegistration,
   checkRogDonation,
+  checkRecentRogDonationOnChain,
   checkAllPrerequisites,
   registerCommunityOnRog,
   registerDonationOnRog,

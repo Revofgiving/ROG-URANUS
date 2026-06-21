@@ -17,6 +17,10 @@ const db           = require('./db-manager');
 const tableManager = require('./table-manager');
 const asyncQ       = require('./async-queue');
 
+// USDC.e (token ROG distribuito) — usato per leggere il saldo reale della cassa
+// nell'invariante di solvibilità. Override via env USDC_CONTRACT_ADDRESS.
+const USDC_CONTRACT_CASSA = (process.env.USDC_CONTRACT_ADDRESS || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174');
+
 // ── COSTANTI FIFO ─────────────────────────────────────────────
 
 const FIFO = {
@@ -31,7 +35,7 @@ const FIFO = {
   NETTO_HUMAN:          800,     // 800 USDC in tasca (aggiornato sessione 4: era 1.000)
 
   // HUMAN — distribuzione netto 1.000 (sessione 4)
-  PHARAOH_HUMAN:        100,     // PHARAOH SINGOLO (interim: 5 dual rientri Sole = 10 pos)
+  PHARAOH_HUMAN:        100,     // PHARAOH SINGOLO — accantonato in cassa URANUS (PHARAOH_PENDING) fino all'avvio di PHARAOH
   ROG_SMALL_HUMAN_NUOVI: 60,     // 30 ingressi dual ROG SMALL × 2 USDC
   SOLE_L0_URANUS_HUMAN:  40,     // 2 ingressi dual Sole L0 URANUS × 20 USDC
 
@@ -58,6 +62,29 @@ async function posizionaRientroSoleUnico(wallet, nome) {
     turno: turno.numero_turno, sdoppiabile: true
   });
   await db.incrementSacerdotiEntrati(turno.id);
+}
+
+// ── INVARIANTE DI SOLVIBILITÀ ───────────────────────────────────────────
+// Legge il saldo USDC.e reale del wallet cassa-Uranus. Ritorna un numero
+// (USDC) oppure null se non leggibile (RPC/wallet non configurati o errore).
+async function getSaldoCassaUsdc() {
+  const rpcUrl = process.env.POLYGON_RPC_URL;
+  const cassa  = process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET;
+  if (!rpcUrl || !cassa) return null;
+  try {
+    const { ethers } = require('ethers');
+    const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+    const usdc = new ethers.Contract(
+      USDC_CONTRACT_CASSA,
+      ['function balanceOf(address) view returns (uint256)'],
+      provider
+    );
+    const bal = await usdc.balanceOf(cassa);
+    return Number(ethers.utils.formatUnits(bal, 6));
+  } catch (e) {
+    console.warn(`\u26a0\ufe0f  [Solvibilit\u00e0] Lettura saldo cassa fallita: ${e.message}`);
+    return null;
+  }
 }
 
 // ── STATO ──────────────────────────────────────────────────────────────
@@ -181,6 +208,20 @@ async function processaUscita() {
   const uscita = calcolaUscitaFifo(tipoAccount);
   const numeroUscita = stato.prossima_uscita;
 
+  // \ud83d\udd12 INVARIANTE DI SOLVIBILIT\u00c0 (solo HUMAN: comporta un payout reale in uscita).
+  // La CASSA \u00e8 solo accantonamento (nessun trasferimento) \u2192 nessun controllo.
+  // Best-effort: se il saldo \u00e8 leggibile e < payout dovuto, l'uscita viene DIFFERITA
+  // (la testa resta in coda, si ritenta al prossimo trigger). Disattivabile con
+  // SOLVENCY_GUARD=false. Il gate finale resta comunque payout-manager (balanceOf pre-transfer).
+  if (tipoAccount === 'HUMAN' && process.env.SOLVENCY_GUARD !== 'false') {
+    const saldo = await getSaldoCassaUsdc();
+    if (saldo !== null && saldo < uscita.nettoPersona) {
+      console.warn(`\ud83d\udd12 [Solvibilit\u00e0] Uscita HUMAN #${numeroUscita} DIFFERITA: saldo cassa ${saldo} USDC < payout ${uscita.nettoPersona} USDC`);
+      try { const a = require('./alert-manager'); a.sendAlert('WARN', 'SOLVIBILITA', `Uscita #${numeroUscita} differita: saldo ${saldo} < payout ${uscita.nettoPersona} USDC`); } catch (_) {}
+      return null; // lascia la testa in coda; ritenta al prossimo trigger
+    }
+  }
+
   // 1. Consuma rientri dal pool
   const rientriUsati = Math.min(check.rientriPool, FIFO.POSIZIONI_PER_USCITA);
   const daDonatori = FIFO.POSIZIONI_PER_USCITA - rientriUsati;
@@ -257,21 +298,15 @@ async function processaUscita() {
   if (tipoAccount === 'HUMAN' && uscita.pharaohHuman) {
     const cassaW = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
 
-    // PHARAOH SINGOLO (100 USDC) — interim: 5 ingressi dual rientri Sole → coda background
+    // PHARAOH SINGOLO (100 USDC) — ACCANTONATO in cassa URANUS (PHARAOH_PENDING),
+    // esattamente come l'uscita L3: i 100 USDC NON vengono ricircolati a Sole; restano
+    // in cassa, riservati al PHARAOH, finché PHARAOH non parte. num_posizioni = 0.
     await pg.queryOne(
       `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, uscita_numero, tipo_uscita)
-       VALUES ('PHARAOH_NETTUNO_HUMAN', $1, $2, $3, $4, 'HUMAN') RETURNING *`,
-      [testa.wallet, uscita.pharaohHuman, uscita.pharaohHuman / FIFO.COSTO_RIENTRO, numeroUscita]
+       VALUES ('PHARAOH_PENDING_NETTUNO', $1, $2, 0, $3, 'HUMAN') RETURNING *`,
+      [testa.wallet, uscita.pharaohHuman, numeroUscita]
     );
-    { const nPharaoh = uscita.pharaohHuman / (2 * FIFO.COSTO_RIENTRO);
-      const _tw = testa.wallet, _cw = cassaW, _nu = numeroUscita;
-      for (let i = 0; i < nPharaoh; i++) {
-        const idx = i;
-        asyncQ.enqueue(() => posizionaRientroSoleUnico(_cw, `CASSA PHARAOH rientro Sole #${idx+1} (Nettuno #${_nu})`), `net-ph-c${idx}`);
-        asyncQ.enqueue(() => posizionaRientroSoleUnico(_tw, `PHARAOH rientro Sole #${idx+1} (Nettuno #${_nu})`), `net-ph-h${idx}`);
-      }
-      console.log(`   🔮 PHARAOH: ${uscita.pharaohHuman} USDC → ${nPharaoh} dual rientri Sole (in coda)`);
-    }
+    console.log(`   🔮 PHARAOH: ${uscita.pharaohHuman} USDC accantonati in cassa URANUS (PHARAOH_PENDING)`);
 
     // ROG SMALL nuovi (30 ingressi dual × 2 USDC = 60 USDC)
     await pg.queryOne(
@@ -299,6 +334,15 @@ async function processaUscita() {
   }
 
   try { const a = require('./alert-manager'); a.sendAlert('INFO', 'USCITA_FIFO', `FIFO #${numeroUscita}: ${tipoAccount} — ${uscita.nettoPersona} USDC`); } catch (_) {}
+
+  // 🎁 Dono pendente Nettuno (solo HUMAN: comporta un payout reale di nettoPersona).
+  // L'utente lo ritira via ACCETTA DONO (gate fondi in cassa). CASSA = accantonamento, niente dono.
+  if (tipoAccount === 'HUMAN' && uscita.nettoPersona > 0) {
+    try {
+      const giftManager = require('./gift-manager');
+      await giftManager.creaDonoPendente(testa.wallet, uscita.nettoPersona, 6, 'PAYOUT_NETTUNO', { numeroUscita });
+    } catch (e) { console.error(`⚠️  [Nettuno] creaDonoPendente: ${e.message}`); }
+  }
 
   return { numeroUscita, posizione: testa.posizione, wallet: testa.wallet, tipoAccount, uscita, rientriUsati, daDonatori };
 }
@@ -347,4 +391,5 @@ module.exports = {
   processaUsciteCascata,
   getStatoFifo,
   getStatisticheFifo,
+  getSaldoCassaUsdc,
 };
