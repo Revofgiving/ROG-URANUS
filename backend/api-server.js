@@ -418,6 +418,21 @@ app.post('/api/messaggi/letti', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// [ADMIN] Correzione wallet di UN SINGOLO dono PENDING (puntuale, transazionale, con audit log).
+// Consentita solo su status='PENDING'; vietata su PROCESSING/ACCEPTED/EXPIRED. Nessun update massivo.
+app.post('/api/admin/dono/:id/correggi-wallet', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  const { nuovoWallet } = req.body;
+  if (!nuovoWallet || !/^0x[a-fA-F0-9]{40}$/.test(nuovoWallet)) {
+    return res.status(400).json({ error: 'nuovoWallet non valido' });
+  }
+  const adminId = req.headers['x-admin-user'] || req.body?.admin || 'ADMIN';
+  try {
+    const result = await giftManager.correggiWalletDonoPending(Number(req.params.id), nuovoWallet, adminId);
+    res.json(result);
+  } catch (e) { res.status(400).json({ success: false, error: e.message }); }
+});
+
 // ── KYC STATUS ──
 const kycBridge = require('./kyc-bridge');
 

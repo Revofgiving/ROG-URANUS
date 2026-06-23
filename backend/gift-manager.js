@@ -13,6 +13,7 @@
  */
 'use strict';
 
+const crypto = require('crypto');
 const pg = require('./pg-connection-manager');
 
 // ── COSTANTI ──────────────────────────────────────────────────────
@@ -69,6 +70,25 @@ async function initGiftTables() {
   // Migrazione idempotente: flag per notificare UNA sola volta quando il dono è pronto (fondi in cassa).
   await pg.query(`ALTER TABLE doni_pendenti ADD COLUMN IF NOT EXISTS pronto_notificato BOOLEAN DEFAULT FALSE`);
 
+  // Migrazione idempotente: chiave evento per impedire doni DUPLICATI sulla stessa uscita
+  // (redeploy / riesecuzione cascata FIFO). I record storici restano con event_key NULL
+  // e in PostgreSQL i NULL non collidono nell'indice UNIQUE → nessun conflitto in migrazione.
+  await pg.query(`ALTER TABLE doni_pendenti ADD COLUMN IF NOT EXISTS event_key TEXT`);
+  await pg.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_doni_event_key ON doni_pendenti(event_key)`);
+
+  // Tabella audit (NUOVA, additiva): traccia le correzioni amministrative del wallet di un
+  // singolo dono PENDING. Non modifica alcuna tabella esistente.
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS doni_wallet_corrections (
+      id SERIAL PRIMARY KEY,
+      dono_id INTEGER NOT NULL,
+      vecchio_wallet TEXT NOT NULL,
+      nuovo_wallet TEXT NOT NULL,
+      admin TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
   console.log('🎁 [GiftManager] Tabelle doni_pendenti + messaggi pronte');
 }
 
@@ -92,12 +112,48 @@ async function creaDonoPendente(wallet, importo, livello, tipoUscita, dettagli =
   const livelloNomi = { 3: 'Venere', 5: 'Saturno', 6: 'Nettuno', 4: 'Giove' };
   const livelloNome = livelloNomi[livello] || `Livello ${livello}`;
 
-  // Crea dono pendente (scadenza cablata su GIFT_EXPIRY_DAYS: unica fonte di verità)
+  // ── IDEMPOTENZA: event_key univoca-per-evento e stabile-per-replay ──
+  // Discriminatore evento:
+  //  • Nettuno passa dettagli.numeroUscita (id uscita FIFO) → già univoco.
+  //  • L3/L4/L5 NON ricevono il turno: usiamo come sequenza il numero di doni GIÀ
+  //    CONCLUSI (ACCEPTED/EXPIRED) per la stessa (wallet, livello, tipo_uscita).
+  //    Resta stabile durante un replay (il dono in corso è PENDING → non contato)
+  //    e cresce solo dopo la chiusura del precedente, distinguendo un'uscita
+  //    legittima futura da una semplice riesecuzione/redeploy.
+  let discriminatore;
+  if (dettagli && dettagli.numeroUscita != null) {
+    discriminatore = `u:${dettagli.numeroUscita}`;
+  } else {
+    const seqRow = await pg.queryOne(
+      `SELECT COUNT(*)::int AS n FROM doni_pendenti
+       WHERE wallet = $1 AND livello = $2 AND tipo_uscita = $3
+         AND status IN ('ACCEPTED', 'EXPIRED')`,
+      [w, livello, tipoUscita]
+    );
+    discriminatore = `s:${seqRow ? seqRow.n : 0}`;
+  }
+  const eventKey = crypto
+    .createHash('sha256')
+    .update(`${w}|${livello}|${tipoUscita}|${Number(importo)}|${discriminatore}`)
+    .digest('hex');
+
+  // Crea dono pendente (scadenza cablata su GIFT_EXPIRY_DAYS: unica fonte di verità).
+  // ON CONFLICT (event_key) DO NOTHING → redeploy/replay cascata non creano un secondo dono.
   const dono = await pg.queryOne(
-    `INSERT INTO doni_pendenti (wallet, importo, livello, tipo_uscita, status, expires_at, dettagli)
-     VALUES ($1, $2, $3, $4, 'PENDING', NOW() + ($6 || ' days')::interval, $5) RETURNING *`,
-    [w, importo, livello, tipoUscita, JSON.stringify(dettagli), String(GIFT_EXPIRY_DAYS)]
+    `INSERT INTO doni_pendenti (wallet, importo, livello, tipo_uscita, status, expires_at, dettagli, event_key)
+     VALUES ($1, $2, $3, $4, 'PENDING', NOW() + ($6 || ' days')::interval, $5, $7)
+     ON CONFLICT (event_key) DO NOTHING
+     RETURNING *`,
+    [w, importo, livello, tipoUscita, JSON.stringify(dettagli), String(GIFT_EXPIRY_DAYS), eventKey]
   );
+
+  // Conflitto: dono già presente per questa esatta uscita. Idempotente: nessun secondo
+  // record e NESSUN secondo messaggio. Restituiamo il record esistente.
+  if (!dono) {
+    const esistente = await pg.queryOne(`SELECT * FROM doni_pendenti WHERE event_key = $1`, [eventKey]);
+    console.log(`🎁 [GiftManager] Dono già presente per ${w.substring(0, 10)} ${tipoUscita} (event_key) — creazione duplicata ignorata`);
+    return esistente;
+  }
 
   // A creazione il dono è solo "in arrivo": i fondi potrebbero non essere ancora in cassa.
   // Il messaggio "dono pronto" + l'illuminazione del bottone arrivano dopo, quando il saldo
@@ -354,6 +410,58 @@ async function getStoricoDoni(wallet) {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// CORREZIONE AMMINISTRATIVA WALLET (SINGOLO DONO, SOLO PENDING)
+// ════════════════════════════════════════════════════════════════════
+
+/**
+ * Corregge il wallet destinatario di UN SINGOLO dono, consentito SOLO se status='PENDING'.
+ * Operazione amministrativa puntuale: nessun update massivo, nessun cascade, nessuna modifica
+ * ad accounts.wallet o ad altre tabelle. NON tocca event_key. Esegue in transazione e registra
+ * un audit log (vecchio/nuovo wallet, id dono, admin, timestamp).
+ *
+ * @param {number} donoId - ID del dono da correggere
+ * @param {string} nuovoWallet - Nuovo wallet destinatario (0x...)
+ * @param {string} adminId - Identificativo dell'admin che esegue (per audit)
+ * @returns {Object} esito con vecchio/nuovo wallet
+ */
+async function correggiWalletDonoPending(donoId, nuovoWallet, adminId) {
+  if (!nuovoWallet || !/^0x[a-fA-F0-9]{40}$/.test(nuovoWallet)) {
+    throw new Error('Nuovo wallet non valido');
+  }
+  const nuovo = nuovoWallet.toLowerCase();
+
+  return pg.transaction(async () => {
+    // Lock di riga + lettura stato corrente: blocca race con accettaDono (PENDING→PROCESSING).
+    const corrente = await pg.queryOne(
+      `SELECT id, wallet, status FROM doni_pendenti WHERE id = $1 FOR UPDATE`,
+      [donoId]
+    );
+    if (!corrente) throw new Error(`Dono #${donoId} non trovato`);
+    // Consentito SOLO su PENDING. PROCESSING/ACCEPTED/EXPIRED non possono essere modificati.
+    if (corrente.status !== 'PENDING') {
+      throw new Error(`Correzione non consentita: dono #${donoId} in stato ${corrente.status} (ammesso solo PENDING)`);
+    }
+    const vecchioWallet = corrente.wallet;
+
+    // UPDATE solo della colonna wallet (event_key invariata). Doppio gate su status='PENDING'.
+    const aggiornato = await pg.queryOne(
+      `UPDATE doni_pendenti SET wallet = $2 WHERE id = $1 AND status = 'PENDING' RETURNING *`,
+      [donoId, nuovo]
+    );
+
+    // Audit log (stessa transazione): se fallisce, rollback anche della correzione.
+    await pg.query(
+      `INSERT INTO doni_wallet_corrections (dono_id, vecchio_wallet, nuovo_wallet, admin)
+       VALUES ($1, $2, $3, $4)`,
+      [donoId, vecchioWallet, nuovo, adminId || 'ADMIN']
+    );
+
+    console.log(`🔧 [GiftManager] Correzione wallet dono #${donoId}: ${vecchioWallet} → ${nuovo} (admin: ${adminId || 'ADMIN'})`);
+    return { success: true, donoId, vecchioWallet, nuovoWallet: nuovo, status: aggiornato.status };
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════
 // JOB PERIODICO
 // ════════════════════════════════════════════════════════════════════
 
@@ -381,6 +489,7 @@ module.exports = {
   processaScadenze,
   getDoniPendenti,
   getStoricoDoni,
+  correggiWalletDonoPending,
   inviaMessaggio,
   getMessaggi,
   segnaLetti,

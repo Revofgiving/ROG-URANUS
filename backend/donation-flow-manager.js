@@ -658,22 +658,11 @@ async function gestisciUscitaFaraone(turno) {
     console.log(`   🏁 Primario esce con ${bridgeResult.nettoFinale} USDC netti (dopo bridge)`);
   }
 
-  // 💸 PAYOUT ON-CHAIN: per wallet di sistema (FONDO/CASSA) invia USDC automaticamente.
-  // Per wallet reali il pagamento avviene via 'ACCETTA DONO' nel dashboard.
-  if (tipoAccount === 'FONDO' && bridgeResult.nettoFinale > 0) {
-    const asyncQ = require('./async-queue');
-    asyncQ.enqueue(
-      async () => {
-        const result = await payoutMgr.inviaPagamento(
-          faraoneWallet, bridgeResult.nettoFinale,
-          `USCITA_L3 Turno ${turno.numero_turno}`
-        );
-        if (!result.success) console.error(`⚠️  [PAYOUT FONDO] Fallito: ${result.error}`);
-      },
-      `payout-fondo-l3-turno-${turno.numero_turno}`
-    );
-    console.log(`   💸 [PAYOUT FONDO] In coda: ${bridgeResult.nettoFinale} USDC → ${faraoneWallet.substring(0, 12)}...`);
-  }
+  // 🎁 CANALE UNICO (decisione business): anche il FONDO usa ESCLUSIVAMENTE il dono pendente
+  // creato in bridge.hookUscitaL3() → ACCETTA DONO → accettaDono() → inviaPagamento().
+  // L'auto-payout del FONDO è stato RIMOSSO per eliminare il doppio canale (auto-payout +
+  // ACCETTA DONO) che poteva produrre una doppia distribuzione (es. 500 + 500 = 1000 USDC).
+  // PRIMARIO/SECONDARIO invariati: non hanno mai avuto auto-payout (il guard era === 'FONDO').
 
   await db.completaTurno(turno.id, doniRicevuti);
   await functionManager.distribuisciCreditiPostTurno(turno.numero_turno);
