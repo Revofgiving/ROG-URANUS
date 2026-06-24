@@ -69,7 +69,7 @@ async function checkCommunityRegistration(wallet) {
     return { registered: false, error: 'ROG_BACKEND_URL non configurato' };
   }
 
-  const url = `${ROG_BACKEND_URL}/api/community/status/${wallet}`;
+  const url = `${ROG_BACKEND_URL}/api/community/is-registered/${wallet}`;
   const result = await httpGet(url);
 
   if (!result.success) {
