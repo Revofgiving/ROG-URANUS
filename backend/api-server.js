@@ -89,6 +89,14 @@ app.use(async (req, res, next) => {
 
 // ── HEALTH ──
 app.get('/api/health', (_, res) => res.json({ status: 'ok', sistema: 'SUPERURANO', versione: '4.0.0', timestamp: new Date().toISOString() }));
+app.get('/health', async (_, res) => {
+  try {
+    await pg.queryOne('SELECT 1');
+    res.status(200).json({ success: true, service: 'uranus-backend', database: 'ok' });
+  } catch (_) {
+    res.status(503).json({ success: false, service: 'uranus-backend', database: 'unavailable' });
+  }
+});
 
 // ── INIZIALIZZAZIONE ──
 app.post('/api/inizializza', async (req, res) => {
