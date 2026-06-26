@@ -1230,6 +1230,19 @@ app.post('/api/admin/recupera-rientro', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// ── ADMIN: Avvio PHARAOH — rilascia gli accantonamenti PHARAOH verso CASSA PHARAOH ──
+// Sposta il totale PHARAOH accantonato (`PHARAOH_PENDING_*`, da L3/L5/Nettuno) da cassa
+// Uranus → CASSA PHARAOH. Idempotente: chiamate ripetute senza nuovi accantonamenti
+// non ri-trasferiscono. Il bonifico reale è eseguito dal job di retry di cassa-transfer.
+app.post('/api/admin/pharaoh/avvia', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    const cassaTransfer = require('./cassa-transfer-manager');
+    const result = await cassaTransfer.rilasciaPharaohPending();
+    res.json({ success: true, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── 404 ──
 app.use((_, res) => res.status(404).json({ success: false, error: 'Endpoint non trovato' }));
 
