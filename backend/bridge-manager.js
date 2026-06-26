@@ -103,9 +103,10 @@ const BRIDGE = {
  * @param {string} nome - Nome
  * @param {string} tipoAccount - PRIMARIO | PERPETUO | GEMELLO | FONDO
  * @param {number} nettoOriginale - Netto calcolato da URANO 2 (610 Primario, 110 Secondario)
+ * @param {number} numeroTurno - Numero turno uscita
  * @returns {Object} Dettaglio deduzioni e netto finale
  */
-async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale) {
+async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTurno) {
   console.log(`\n🌉 BRIDGE — Uscita URANO 2 L3 (Venere) → Nettuno`);
   console.log(`   Wallet: ${wallet.substring(0, 12)}...`);
   console.log(`   Tipo: ${tipoAccount}`);
@@ -195,6 +196,7 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale) {
     await cassaTransfer.registraTrasferimento({
       destinazione: 'ROG', importo: BRIDGE.L3_ROG_SMALL_COSTO,
       origineWallet: wallet, motivo: `ROG_SMALL_BRIDGE_L3 ${wallet}`,
+      eventKey: `rog-l3-turno-${numeroTurno}`,
     });
   }
 
@@ -253,9 +255,10 @@ if (!kycCheck.canProceed) {
  * @param {string} wallet - Wallet del Faraone uscente
  * @param {string} nome - Nome
  * @param {number} nettoOriginale - Netto L5 (1.900 USDC)
+ * @param {number} numeroTurno - Numero turno uscita
  * @returns {Object} Dettaglio deduzioni e netto finale
  */
-async function hookUscitaL5(wallet, nome, nettoOriginale) {
+async function hookUscitaL5(wallet, nome, nettoOriginale, numeroTurno) {
   console.log(`\n🌉 BRIDGE — Uscita URANO 2 L5 (Saturno)`);
   console.log(`   Wallet: ${wallet.substring(0, 12)}...`);
   console.log(`   Netto originale L5: ${nettoOriginale} USDC`);
@@ -323,8 +326,16 @@ async function hookUscitaL5(wallet, nome, nettoOriginale) {
 
   // 💸 ROG SMALL → CASSA ROG (reale, persistito + retry): 100 base + 100 extra = 200.
   // PHARAOH (100) resta accantonato in cassa Uranus (PHARAOH_PENDING_L5) fino all'avvio di Pharaoh.
-  await cassaTransfer.registraTrasferimento({ destinazione: 'ROG', importo: BRIDGE.L5_ROG_SMALL_COSTO, origineWallet: wallet, motivo: `ROG_SMALL_BRIDGE_L5 ${wallet}` });
-  await cassaTransfer.registraTrasferimento({ destinazione: 'ROG', importo: BRIDGE.L5_ROG_SMALL_EXTRA_COSTO, origineWallet: wallet, motivo: `ROG_SMALL_EXTRA_BRIDGE_L5 ${wallet}` });
+  await cassaTransfer.registraTrasferimento({
+    destinazione: 'ROG', importo: BRIDGE.L5_ROG_SMALL_COSTO,
+    origineWallet: wallet, motivo: `ROG_SMALL_BRIDGE_L5 ${wallet}`,
+    eventKey: `rog-l5-small-turno-${numeroTurno}`,
+  });
+  await cassaTransfer.registraTrasferimento({
+    destinazione: 'ROG', importo: BRIDGE.L5_ROG_SMALL_EXTRA_COSTO,
+    origineWallet: wallet, motivo: `ROG_SMALL_EXTRA_BRIDGE_L5 ${wallet}`,
+    eventKey: `rog-l5-extra-turno-${numeroTurno}`,
+  });
 
   // Auto-entry Nettuno per il secondario uscente da L5: 5 ingressi DUAL
   // (5 CASSA + 5 HUMAN = 10 posizioni in coda = 100 USDC), come le altre gestioni.

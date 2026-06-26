@@ -648,7 +648,7 @@ async function gestisciUscitaFaraone(turno) {
 
   // 🌉 BRIDGE: auto-entry in URANO 1 (FIFO) + deduzioni ROG/PHARAON
   const nomeAccount = account?.nome || faraoneWallet.substring(0, 10);
-  const bridgeResult = await bridge.hookUscitaL3(faraoneWallet, nomeAccount, tipoAccount, uscita.netto);
+  const bridgeResult = await bridge.hookUscitaL3(faraoneWallet, nomeAccount, tipoAccount, uscita.netto, turno.numero_turno);
 
   // Secondario → L4
   if (uscita.passaAlL4) {
@@ -797,7 +797,7 @@ async function gestisciUscitaL5(turno) {
 
   // 🌉 BRIDGE: deduzioni L5 + auto-entry FIFO
   const nomeAccount = account?.nome || faraoneWallet.substring(0, 10);
-  const bridgeResult = await bridge.hookUscitaL5(faraoneWallet, nomeAccount, uscita.netto);
+  const bridgeResult = await bridge.hookUscitaL5(faraoneWallet, nomeAccount, uscita.netto, turno.numero_turno);
 
   console.log(`🏁 Faraone esce DEFINITIVAMENTE (Uranus) — netto L5 dopo bridge: ${bridgeResult.nettoFinale} USDC`);
   console.log(`   Totale SUPERURANO: Venere(90) + Giove(400) + Saturno(${bridgeResult.nettoFinale}) + Nettuno(1.000) = ${90 + 400 + bridgeResult.nettoFinale + 1000} USDC`);
