@@ -1,12 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import PopupNeedRogSmall from "@/components/register/PopupNeedRogSmall";
+import PopupNotCommunity from "@/components/register/PopupNotCommunity";
+import { evaluateRogGate, type GateDecision } from "@/lib/rog-gate";
 import Image from "next/image";
 import StarField from "@/components/effects/StarField";
-import { sendUsdc } from "@/lib/usdc";
-import { saveSession } from "@/lib/auth";
+import { sendToken, TOKENS } from "@/lib/usdc";
+import type { TokenKey } from "@/lib/usdc";
+import { signInWithEthereum, saveSession } from "@/lib/auth";
 import { dona } from "@/lib/api";
+
+// Prezzo oro approssimativo (aggiornare periodicamente, NON ad ogni tx)
+// Ultimo aggiornamento: 8 giugno 2026 (fonte: MetaMask)
+const GOLD_PRICE_USD = 4000; // allineato con GOLD_PRICE_USD su Coolify // 1 XAUt0 ≈ 1 oncia troy ≈ ~$4.675
 type EthereumProvider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
 };
@@ -23,9 +31,6 @@ function shortTxHash(hash: string) {
   return `${hash.slice(0, 10)}...${hash.slice(-8)}`;
 }
 
-// ============================================================
-// SPAZIATURA ISCRIZIONE — regola da pannello 📐 poi incolla qui
-// ============================================================
 const DEFAULT_REG = {
   logoSize:     169,
   logoMb:       31,
@@ -39,112 +44,6 @@ const DEFAULT_REG = {
   btnGap:       18,
   btnH:         60,
 };
-const ENABLE_REG_SPACING_PANEL = false;
-const ENABLE_DONATION_SPACING_PANEL = false;
-// ============================================================
-
-interface RegSpacing {
-  logoSize: number;
-  logoMb: number;
-  rivolMb: number;
-  titleSize: number;
-  titleTrack: number;
-  titleMb: number;
-  descMb: number;
-  labelMb: number;
-  btnMaxW: number;
-  btnGap: number;
-  btnH: number;
-}
-
-const regLabels: Record<keyof RegSpacing, string> = {
-  logoSize:   "Logo — dimensione",
-  logoMb:     "Logo — spazio sotto",
-  rivolMb:    "\"Rivoluzione di\" — spazio sotto",
-  titleSize:  "ROG-URANUS — font size",
-  titleTrack: "ROG-URANUS — letter spacing",
-  titleMb:    "ROG-URANUS — spazio sotto",
-  descMb:     "Descrizione — spazio sotto",
-  labelMb:    "Label piccola — spazio sotto",
-  btnMaxW:    "Bottoni — larghezza max",
-  btnGap:     "Bottoni — gap tra loro",
-  btnH:       "Bottoni — altezza",
-};
-
-const regRanges: Record<keyof RegSpacing, [number, number]> = {
-  logoSize:   [40, 200],
-  logoMb:     [0, 60],
-  rivolMb:    [0, 30],
-  titleSize:  [30, 100],
-  titleTrack: [0, 20],
-  titleMb:    [0, 40],
-  descMb:     [0, 60],
-  labelMb:    [0, 40],
-  btnMaxW:    [200, 500],
-  btnGap:     [4, 30],
-  btnH:       [36, 70],
-};
-
-function RegSpacingPanel({ values, onChange }: { values: RegSpacing; onChange: (v: RegSpacing) => void }) {
-  const [panelOpen, setPanelOpen] = useState(false);
-
-  const update = (key: keyof RegSpacing, val: number) => onChange({ ...values, [key]: val });
-
-  const copyToClipboard = () => {
-    const code = `const DEFAULT_REG = ${JSON.stringify(values, null, 2)};`;
-    navigator.clipboard.writeText(code);
-  };
-
-  if (!panelOpen) {
-    return (
-      <button
-        onClick={() => setPanelOpen(true)}
-        className="fixed bottom-4 right-4 z-[100] w-12 h-12 rounded-full flex items-center justify-center text-white text-lg"
-        style={{ background: 'linear-gradient(135deg, #7c3aed, #22d3ee)', boxShadow: '0 0 20px rgba(124,58,237,0.4)' }}
-        title="Apri pannello spaziatura"
-      >
-        📐
-      </button>
-    );
-  }
-
-  return (
-    <div
-      className="fixed right-4 top-4 bottom-4 z-[100] w-[320px] rounded-2xl overflow-hidden flex flex-col"
-      style={{ background: 'rgba(8,12,28,0.95)', backdropFilter: 'blur(20px)', border: '1px solid rgba(34,211,238,0.2)', boxShadow: '0 0 40px rgba(0,0,0,0.5)' }}
-    >
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-        <span className="text-sm font-bold tracking-[2px] text-white">📐 ISCRIZIONE</span>
-        <div className="flex gap-2">
-          <button onClick={copyToClipboard} className="text-[10px] px-2.5 py-1 rounded-full bg-uranus-cyan/10 border border-uranus-cyan/30 text-uranus-cyan hover:bg-uranus-cyan/20 transition-all">📋 Copia</button>
-          <button onClick={() => setPanelOpen(false)} className="w-7 h-7 rounded-full flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 transition-all">✕</button>
-        </div>
-      </div>
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4" style={{ scrollbarWidth: 'thin' }}>
-        {(Object.keys(regLabels) as (keyof RegSpacing)[]).map((key) => {
-          const [min, max] = regRanges[key];
-          return (
-            <div key={key}>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-[10px] text-white/50 font-medium">{regLabels[key]}</label>
-                <span className="text-[11px] font-bold text-uranus-cyan min-w-[36px] text-right">{values[key]}px</span>
-              </div>
-              <input
-                type="range" min={min} max={max} value={values[key]}
-                onChange={(e) => update(key, Number(e.target.value))}
-                className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
-                style={{ background: `linear-gradient(to right, #22d3ee ${((values[key] - min) / (max - min)) * 100}%, rgba(255,255,255,0.08) ${((values[key] - min) / (max - min)) * 100}%)`, accentColor: '#22d3ee' }}
-              />
-            </div>
-          );
-        })}
-      </div>
-      <div className="px-4 py-2 border-t border-white/10">
-        <p className="text-[9px] text-white/25 text-center">Regola → premi &quot;📋 Copia&quot; → incolla in register/page.tsx</p>
-      </div>
-    </div>
-  );
-}
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -152,28 +51,15 @@ export default function RegisterPage() {
   const [txHash, setTxHash] = useState("");
   const [posizioni, setPosizioni] = useState(1);
   const [loading, setLoading] = useState(false);
-  const [step, setStep] = useState<"connect" | "form" | "done">("connect");
+  const [selectedToken, setSelectedToken] = useState<TokenKey>("USDC");
+  const [step, setStep] = useState<"connect" | "checking" | "not-community" | "need-rog-small" | "form" | "done">("connect");
   const [assignedNumber, setAssignedNumber] = useState(0);
-  const [sp, setSp] = useState<RegSpacing>(DEFAULT_REG);
+  const sp = DEFAULT_REG;
   const [viewportWidth, setViewportWidth] = useState(0);
-  // Spacing controls (step 2/3 — donation modal)
-  const [d, setD] = useState({ gap: 28, logoMb: 20, titleMb: 12, walletMt: 0, qtyMt: 0, sumMt: 0, btnMt: 0 });
-  const [dPanelOpen, setDPanelOpen] = useState(false);
-  const dLabels: Record<string, string> = {
-    gap: "Gap generale tra sezioni",
-    logoMb: "Logo — spazio sotto",
-    titleMb: "Titolo — spazio sotto",
-    walletMt: "Wallet — spazio extra sopra",
-    qtyMt: "Quantità — spazio extra sopra",
-    sumMt: "Riepilogo — spazio extra sopra",
-    btnMt: "Bottone — spazio extra sopra",
-  };
-  const dRanges: Record<string, [number, number]> = {
-    gap: [8, 60], logoMb: [0, 50], titleMb: [0, 40],
-    walletMt: [0, 40], qtyMt: [0, 40], sumMt: [0, 40], btnMt: [0, 40],
-  };
+  const d = { gap: 28, logoMb: 20, titleMb: 12, walletMt: 0, qtyMt: 0, sumMt: 0, btnMt: 0 };
 
   const [errore, setErrore] = useState("");
+  const [statusMsg, setStatusMsg] = useState("");
 
   useEffect(() => {
     const updateViewport = () => setViewportWidth(window.innerWidth);
@@ -211,9 +97,49 @@ export default function RegisterPage() {
   };
   const donationBackground = step === "done" ? "/donation.png" : "/register-bg.png";
 
+  // ── Cambio rete a Polygon (eseguito al momento del dono; non-throwing) ──
+  const switchToPolygon = useCallback(async () => {
+    const ethereum = (window as WindowWithEthereum).ethereum;
+    if (!ethereum) return;
+    try {
+      await ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x89" }] });
+    } catch (switchError: unknown) {
+      if ((switchError as EthereumError).code === 4902) {
+        try {
+          await ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: "0x89",
+              chainName: "Polygon Mainnet",
+              nativeCurrency: { name: "MATIC", symbol: "POL", decimals: 18 },
+              rpcUrls: ["https://polygon-rpc.com"],
+              blockExplorerUrls: ["https://polygonscan.com"],
+            }],
+          });
+        } catch { /* aggiunta rete rifiutata: si riproverà al dono */ }
+      }
+      // altri errori (es. switch rifiutato) non bloccano: il dono ritenterà lo switch
+    }
+  }, []);
+
+  // ── Instradamento: applica la decisione del gate ROG (logica condivisa in @/lib/rog-gate) ──
+  // Il cambio rete Polygon NON avviene qui ma in inviaDono (al momento del dono),
+  // così l'auto-connect non genera prompt di rete inattesi all'apertura della pagina.
+  const applyDecision = useCallback(async (decision: GateDecision) => {
+    if (decision === "offline-blocked") {
+      setErrore("Il sito ROG è momentaneamente offline. Riprovare tra qualche minuto.");
+      setStep("connect");
+      setStatusMsg("");
+      return;
+    }
+    setStep(decision); // "form" | "not-community" | "need-rog-small"
+    setStatusMsg("");
+  }, []);
+
   const connectWallet = async () => {
     setLoading(true);
     setErrore("");
+    setStatusMsg("");
     try {
       if (typeof window === "undefined" || !(window as WindowWithEthereum).ethereum) {
         setErrore("MetaMask non trovato. Installa l'estensione MetaMask nel browser.");
@@ -221,51 +147,25 @@ export default function RegisterPage() {
         return;
       }
       const ethereum = (window as WindowWithEthereum).ethereum;
-      if (!ethereum) {
-        setLoading(false);
-        return;
-      }
+      if (!ethereum) { setLoading(false); return; }
 
-      // Richiedi accesso account
-      const accounts = await ethereum.request({
-        method: "eth_requestAccounts",
-      }) as string[];
-
+      // ── 1. Connetti MetaMask ─────────────────────────────────────────
+      setStatusMsg("Connessione MetaMask...");
+      const accounts = await ethereum.request({ method: "eth_requestAccounts" }) as string[];
       if (!accounts || accounts.length === 0) {
         setErrore("Nessun account selezionato. Riprova.");
         setLoading(false);
         return;
       }
+      const walletAddr = accounts[0];
+      setWallet(walletAddr);
 
-      setWallet(accounts[0]);
+      // ── 3-6. Verifica prerequisiti ROG e instradamento (gate condiviso @/lib/rog-gate) ──
+      setStatusMsg("Verifica in corso...");
+      setStep("checking");
+      const decision = await evaluateRogGate(walletAddr);
+      await applyDecision(decision);
 
-      // Switch a Polygon solo se necessario (evita popup inutile)
-      const currentChain = await ethereum.request({ method: "eth_chainId" }) as string;
-      if (currentChain !== "0x89") {
-        try {
-          await ethereum.request({
-            method: "wallet_switchEthereumChain",
-            params: [{ chainId: "0x89" }],
-          });
-        } catch (switchError: unknown) {
-          if ((switchError as EthereumError).code === 4902) {
-            await ethereum.request({
-              method: "wallet_addEthereumChain",
-              params: [
-                {
-                  chainId: "0x89",
-                  chainName: "Polygon Mainnet",
-                  nativeCurrency: { name: "MATIC", symbol: "POL", decimals: 18 },
-                  rpcUrls: ["https://polygon-rpc.com"],
-                  blockExplorerUrls: ["https://polygonscan.com"],
-                },
-              ],
-            });
-          }
-        }
-      }
-
-      setStep("form");
     } catch (err: unknown) {
       console.error("Errore connessione wallet:", err);
       if ((err as EthereumError).code === 4001) {
@@ -273,9 +173,74 @@ export default function RegisterPage() {
       } else {
         setErrore("Errore di connessione. Controlla che MetaMask sia sbloccato.");
       }
+      setStep("connect");
     }
     setLoading(false);
+    setStatusMsg("");
   };
+
+  // ── Ri-verifica manuale (bottoni "HO DONATO / HO COMPLETATO") senza re-prompt MetaMask ──
+  const recheck = useCallback(async () => {
+    if (!wallet) return;
+    setLoading(true);
+    setErrore("");
+    try {
+      const decision = await evaluateRogGate(wallet);
+      // In ri-verifica non blocchiamo: se ROG è offline restiamo sul popup corrente.
+      if (decision !== "offline-blocked") {
+        await applyDecision(decision);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [wallet, applyDecision]);
+
+  // ── Polling automatico: appena i prerequisiti ROG sono soddisfatti,
+  //    l'utente viene reindirizzato AUTOMATICAMENTE alla donazione URANUS.
+  //    Avanza anche not-community → need-rog-small senza intervento manuale. ──
+  useEffect(() => {
+    if ((step !== "not-community" && step !== "need-rog-small") || !wallet) return;
+    let cancelled = false;
+    const id = setInterval(async () => {
+      const decision = await evaluateRogGate(wallet);
+      if (cancelled) return;
+      if (decision === "form") {
+        clearInterval(id);
+        await applyDecision("form");
+      } else if (decision === "need-rog-small" && step === "not-community") {
+        // Community completata → avanza al passo "invia dono ROG Small".
+        setStep("need-rog-small");
+      }
+    }, 8000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [step, wallet, applyDecision]);
+
+  // ── Auto-connect silenzioso: se un wallet è già autorizzato (es. arrivo da /community),
+  //    esegue il gate senza prompt e instrada direttamente (donazione o popup). ──
+  useEffect(() => {
+    (async () => {
+      const ethereum = (window as WindowWithEthereum).ethereum;
+      if (!ethereum) return;
+      try {
+        const accounts = await ethereum.request({ method: "eth_accounts" }) as string[];
+        if (!accounts || accounts.length === 0) return;
+        const walletAddr = accounts[0];
+        setWallet(walletAddr);
+        setStep("checking");
+        const decision = await evaluateRogGate(walletAddr);
+        await applyDecision(decision);
+      } catch { /* nessun wallet pre-autorizzato: resta su connect */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Conversione token ──
+  const usdcPerPosition = 20;
+  const totalUsdc = posizioni * usdcPerPosition;
+  const totalXaut = totalUsdc / GOLD_PRICE_USD;
+  const displayAmount = selectedToken === "USDC" ? `${totalUsdc} USDC` : `${totalXaut.toFixed(6)} XAUt0`;
+  const displayEquiv = selectedToken === "XAUT0" ? `≈ ${totalUsdc} USDC` : `≈ ${totalXaut.toFixed(6)} XAUt0`;
+  const sendAmount = selectedToken === "USDC" ? totalUsdc : totalXaut;
 
   const inviaDono = async () => {
     if (!wallet) return;
@@ -285,31 +250,76 @@ export default function RegisterPage() {
       const ethereum = (window as WindowWithEthereum).ethereum;
       if (!ethereum) { setLoading(false); return; }
 
-      // 1. Trasferimento USDC ERC-20 su Polygon
-      const totalUsdc = posizioni * 20;
-      const txHash = await sendUsdc(ethereum, wallet, totalUsdc);
+      // 0. Assicura la rete Polygon (lo switch è spostato qui, al momento del dono)
+      setStatusMsg("Verifica rete Polygon...");
+      await switchToPolygon();
+
+      // 1. Trasferimento token ERC-20 su Polygon (USDC o XAUt0)
+      setStatusMsg("Invio transazione su Polygon...");
+      const txHash = await sendToken(ethereum, wallet, sendAmount, selectedToken);
       setTxHash(txHash);
 
-      // 2. Registra la donazione nel backend (se disponibile)
+      // 2. Accoda la donazione nel backend (ritorna subito con jobId)
+      setStatusMsg("Donazione in coda...");
       let ticket: number | null = null;
       try {
-        const result = await dona({ wallet, txHash, numeroPosizioni: posizioni });
-        ticket = result.ticket;
-      } catch {
-        // Backend non ancora collegato
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+        const queueRes = await fetch(`${API_URL}/api/dona`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wallet, txHash, numeroPosizioni: posizioni }),
+        });
+        const queueData = await queueRes.json() as { jobId?: string; status?: string; error?: string };
+
+        if (queueData.jobId) {
+          // 3. Polling ogni 2s fino a COMPLETED o FAILED
+          setStatusMsg("Creazione posizioni in corso...");
+          ticket = await new Promise<number | null>((resolve, reject) => {
+            let attempts = 0;
+            const maxAttempts = 90; // 3 minuti max
+            const poll = setInterval(async () => {
+              attempts++;
+              try {
+                const statusRes = await fetch(`${API_URL}/api/dona/status/${queueData.jobId}`);
+                const statusData = await statusRes.json() as {
+                  status?: string;
+                  result?: { success?: boolean; ticket?: number };
+                  error?: string;
+                  position?: number;
+                  queueLength?: number;
+                };
+
+                if (statusData.status === "COMPLETED" && statusData.result) {
+                  clearInterval(poll);
+                  resolve(statusData.result.ticket ?? null);
+                } else if (statusData.status === "FAILED") {
+                  clearInterval(poll);
+                  reject(new Error(statusData.error || "Donazione fallita"));
+                } else if (statusData.position && statusData.queueLength) {
+                  setStatusMsg(`Posizione ${statusData.position}/${statusData.queueLength} nella coda...`);
+                }
+
+                if (attempts >= maxAttempts) {
+                  clearInterval(poll);
+                  resolve(null); // timeout — non bloccare, mostra "in attesa"
+                }
+              } catch {
+                // errore polling — continua a provare
+              }
+            }, 2000);
+          });
+        } else if (queueData.error) {
+          throw new Error(queueData.error);
+        }
+      } catch (backendErr) {
+        // Se il backend non è raggiungibile, mostra comunque la conferma tx
+        console.warn("Backend non raggiungibile:", backendErr);
       }
 
-      // 3. Salva wallet per area personale (senza firma SIWE)
-      saveSession({
-        wallet,
-        name: wallet.slice(0, 6) + "..." + wallet.slice(-4),
-        message: "",
-        signature: "",
-        chainId: 137,
-        issuedAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-      });
-      localStorage.setItem("uranus_user", JSON.stringify({ wallet }));
+      // 4. Autenticazione SIWE
+      setStatusMsg("Autenticazione...");
+      const session = await signInWithEthereum(ethereum, wallet);
+      saveSession(session);
 
       setAssignedNumber(ticket ?? 0);
       setStep("done");
@@ -318,179 +328,136 @@ export default function RegisterPage() {
       if ((err as EthereumError).code === 4001) {
         setErrore("Transazione rifiutata. Accetta la richiesta in MetaMask.");
       } else {
-        setErrore("Errore durante l'invio del dono. Riprova.");
+        setErrore((err as Error).message || "Errore durante l'invio del dono. Riprova.");
       }
     }
     setLoading(false);
+    setStatusMsg("");
   };
 
-  if (step === "connect") {
+  if (step === "connect" || step === "checking" || step === "not-community" || step === "need-rog-small") { // eslint-disable-line @typescript-eslint/no-unused-vars
     return (
-      <section className="relative min-h-screen overflow-hidden bg-[#020711] p-1 sm:p-2">
-        <div
-          className="relative min-h-[calc(100vh-0.5rem)] sm:min-h-[calc(100vh-1rem)] overflow-hidden rounded-[34px] border border-uranus-cyan/55 bg-cover bg-[center_right] bg-no-repeat"
-          style={{
-            backgroundImage: "url('/register-bg.png')",
-            boxShadow: "inset 0 0 60px rgba(34, 211, 238, 0.12), 0 0 30px rgba(34, 211, 238, 0.18)",
-          }}
-        >
-          <div className="absolute inset-0 bg-gradient-to-r from-[#030812]/90 via-[#030812]/30 to-[#030812]/5" />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-black/10" />
-          <StarField count={35} />
+      <>
+        {/* ── HERO BACKGROUND (sempre visibile come sfondo) ── */}
+        <section className="relative min-h-screen overflow-hidden bg-[#020711] p-1 sm:p-2">
+          <div
+            className="relative min-h-[calc(100vh-0.5rem)] sm:min-h-[calc(100vh-1rem)] overflow-hidden rounded-[34px] border border-uranus-cyan/55 bg-cover bg-[center_right] bg-no-repeat"
+            style={{
+              backgroundImage: "url('/register-bg.png')",
+              boxShadow: "inset 0 0 60px rgba(34, 211, 238, 0.12), 0 0 30px rgba(34, 211, 238, 0.18)",
+            }}
+          >
+            <div className="absolute inset-0 bg-gradient-to-r from-[#030812]/90 via-[#030812]/30 to-[#030812]/5" />
+            <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-black/10" />
+            <StarField count={35} />
 
-          <header className="hidden">
-            <div
-              className="mx-auto flex w-full max-w-6xl items-center justify-between gap-2 rounded-full px-3 py-2 sm:px-5 sm:py-3"
-              style={{
-                background: "rgba(2,20,38,0.55)",
-                border: "1px solid rgba(34,211,238,0.24)",
-                backdropFilter: "blur(10px)",
-                boxShadow: "0 0 22px rgba(34,211,238,0.18)",
-              }}
-            >
-              <div className="flex min-w-0 flex-nowrap items-center gap-2 sm:gap-3">
-                <span
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full sm:h-12 sm:w-12"
-                  style={{
-                    background: "rgba(2,20,38,0.72)",
-                    border: "1px solid rgba(34,211,238,0.45)",
-                    boxShadow: "0 0 20px rgba(34,211,238,0.35), inset 0 0 14px rgba(34,211,238,0.16)",
-                  }}
-                >
-                  <Image
-                    src="/logo-uranus.png"
-                    alt="ROG-URANUS"
-                    width={38}
-                    height={38}
-                    unoptimized
-                    className="drop-shadow-[0_0_20px_rgba(34,211,238,0.9)]"
-                  />
-                </span>
-                <span
-                  className="max-w-[54vw] truncate whitespace-nowrap text-sm font-bold leading-none tracking-[1px] text-white sm:max-w-none sm:text-base sm:tracking-[4px] md:text-lg"
-                  style={{ fontFamily: "var(--font-orbitron), sans-serif" }}
-                >
-                  ROG-URANUS
-                </span>
-              </div>
-              <button
-                onClick={() => router.push('/')}
-                className="shrink-0 flex items-center gap-1.5 sm:gap-2 rounded-full border border-white/20 bg-white/5 px-3 py-1.5 text-[9px] font-bold uppercase tracking-[2px] text-white/75 backdrop-blur-md transition-all hover:border-uranus-cyan/50 hover:text-white sm:px-4 sm:py-2 sm:text-[10px] sm:tracking-[3px]"
-              >
-                <svg className="hidden h-4 w-4 sm:block" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12l8.954-8.955a1.126 1.126 0 011.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75" />
-                </svg>
-                HOME
-              </button>
-            </div>
-          </header>
-
-          <div className="relative z-10 flex min-h-[calc(100vh-0.5rem)] sm:min-h-[calc(100vh-1rem)] flex-col items-center justify-center px-8 py-10 sm:px-14">
-            {ENABLE_REG_SPACING_PANEL ? <RegSpacingPanel values={sp} onChange={setSp} /> : null}
-
-            <Image
-              src="/logo-uranus.png"
-              alt="ROG-URANUS"
-              width={layoutSp.logoSize}
-              height={layoutSp.logoSize}
-              unoptimized
-              priority
-              className="drop-shadow-[0_0_30px_rgba(0,216,255,0.85)]"
-              style={{ marginBottom: `${layoutSp.logoMb}px` }}
-            />
-
-            <p
-              className="text-center text-xs font-bold uppercase text-uranus-cyan/90 sm:text-sm"
-              style={{ marginBottom: `${layoutSp.rivolMb}px`, letterSpacing: "0.45em" }}
-            >
-              Rivoluzione di
-            </p>
-            <h1
-              className="text-center font-bold uppercase leading-none text-uranus-cyan"
-              style={{
-                fontSize: `clamp(34px, 9vw, ${layoutSp.titleSize}px)`,
-                letterSpacing: `${layoutSp.titleTrack}px`,
-                marginBottom: `${layoutSp.titleMb}px`,
-                textShadow: '0 0 22px rgba(34, 211, 238, 0.9), 0 0 60px rgba(34, 211, 238, 0.35)',
-              }}
-            >
-              ROG-URANUS
-            </h1>
-
-            <p
-              className="text-center text-sm leading-relaxed text-white/70"
-              style={{ marginBottom: `${layoutSp.descMb}px`, maxWidth: `${Math.max(300, Math.round(380 * regScale))}px` }}
-            >
-              La prima comunità che trasforma
-              <br />
-              la collaborazione in <span className="font-bold text-uranus-cyan">valore condiviso.</span>
-            </p>
-
-            <p
-              className="text-center text-[10px] font-bold uppercase text-white/45"
-              style={{ marginBottom: `${layoutSp.labelMb}px`, letterSpacing: "0.22em" }}
-            >
-              Partecipazione · Trasparenza · Crescita collettiva
-            </p>
-            <div className="flex w-full flex-col" style={{ maxWidth: `${layoutSp.btnMaxW}px`, gap: `${layoutSp.btnGap}px` }}>
-              <button
-                onClick={connectWallet}
-                disabled={loading}
-                className="group flex items-center justify-center gap-3 rounded-full border border-uranus-cyan/60 bg-gradient-to-r from-uranus-cyan to-[#0ea5e9] px-7 text-xs font-bold uppercase tracking-[4px] text-white shadow-[0_0_30px_rgba(34,211,238,0.55)] transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_45px_rgba(34,211,238,0.75)] disabled:opacity-60"
-                style={{ height: `${layoutSp.btnH}px` }}
-              >
-                <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M18 7.5a6 6 0 00-12 0v2.25A2.25 2.25 0 003.75 12v6A2.25 2.25 0 006 20.25h12A2.25 2.25 0 0020.25 18v-6A2.25 2.25 0 0018 9.75V7.5z" />
-                </svg>
-                {loading ? "Connessione..." : "Iscriviti ora"}
-              </button>
-
-              <div className="flex flex-col items-center gap-3 mt-2">
-                <p className="text-center text-[12px] leading-relaxed text-white/55">
-                  Per accedere a <span className="font-bold text-uranus-cyan">ROG-URANUS</span> è necessario<br />
-                  avere almeno una posizione attiva in <span className="font-bold text-uranus-cyan">Revolution of Giving</span>
-                </p>
-                <a
-                  href="https://revolutionofgiving.eth.limo"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="group flex items-center justify-center gap-3 w-full rounded-full border border-uranus-cyan/35 bg-[#030812]/50 px-7 text-xs font-bold uppercase tracking-[4px] text-white/75 backdrop-blur-md transition-all duration-300 hover:border-uranus-cyan/75 hover:bg-uranus-cyan/10 hover:text-white"
-                  style={{ height: `${layoutSp.btnH}px` }}
-                >
-                  <svg className="h-4 w-4 text-uranus-cyan" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A3.75 3.75 0 0012 1.5v0a3.75 3.75 0 00-3.75 3.75V9m-.75 0h9A2.25 2.25 0 0118.75 11.25v7.5A2.25 2.25 0 0116.5 21h-9a2.25 2.25 0 01-2.25-2.25v-7.5A2.25 2.25 0 017.5 9z" />
-                  </svg>
-                  Accedi a ROG
-                </a>
-              </div>
-            </div>
-
-            {errore && (
-              <div className="mt-5 max-w-sm rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 backdrop-blur-md">
-                <p className="text-center text-xs text-red-300">{errore}</p>
-              </div>
+            {/* Dimmer quando overlay attivo */}
+            {step !== "connect" && (
+              <div className="absolute inset-0 bg-[#020711]/80 backdrop-blur-sm z-10" />
             )}
 
-            <div className="mt-8 w-full px-8 text-center sm:absolute sm:bottom-8 sm:left-1/2 sm:mt-0 sm:-translate-x-1/2">
-              <p className="text-[10px] font-bold uppercase tracking-[6px] text-white/55">
-                Il cambiamento non si aspetta.
-              </p>
-              <p className="mt-1 text-sm font-bold uppercase tracking-[6px] text-uranus-cyan text-glow-cyan">
-                Entra nella rivoluzione.
-              </p>
-            </div>
-          </div>
+            {/* Hero content — solo nello step connect */}
+            {step === "connect" && (
+              <div className="relative z-10 flex min-h-[calc(100vh-0.5rem)] sm:min-h-[calc(100vh-1rem)] flex-col items-center justify-center px-8 py-10 sm:px-14">
+                <Image src="/logo-uranus.png" alt="ROG-URANUS" width={layoutSp.logoSize} height={layoutSp.logoSize} unoptimized priority
+                  className="drop-shadow-[0_0_30px_rgba(0,216,255,0.85)]" style={{ marginBottom: `${layoutSp.logoMb}px` }} />
 
-          <div className="absolute bottom-6 left-6 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-uranus-cyan/35 bg-black/30 text-xs font-bold text-white/70 backdrop-blur-md">
-            N
+                <p className="text-center text-xs font-bold uppercase text-uranus-cyan/90 sm:text-sm"
+                  style={{ marginBottom: `${layoutSp.rivolMb}px`, letterSpacing: "0.45em" }}>
+                  Rivoluzione di
+                </p>
+                <h1 className="text-center font-bold uppercase leading-none text-uranus-cyan"
+                  style={{ fontSize: `clamp(34px, 9vw, ${layoutSp.titleSize}px)`, letterSpacing: `${layoutSp.titleTrack}px`,
+                    marginBottom: `${layoutSp.titleMb}px`, textShadow: '0 0 22px rgba(34, 211, 238, 0.9), 0 0 60px rgba(34, 211, 238, 0.35)' }}>
+                  ROG-URANUS
+                </h1>
+
+                <p className="text-center text-sm leading-relaxed text-white/70"
+                  style={{ marginBottom: `${layoutSp.descMb}px`, maxWidth: `${Math.max(300, Math.round(380 * regScale))}px` }}>
+                  La prima comunità che trasforma<br />
+                  la collaborazione in <span className="font-bold text-uranus-cyan">valore condiviso.</span>
+                </p>
+
+                <p className="text-center text-[10px] font-bold uppercase text-white/45"
+                  style={{ marginBottom: `${layoutSp.labelMb}px`, letterSpacing: "0.22em" }}>
+                  Partecipazione · Trasparenza · Crescita collettiva
+                </p>
+
+                <div className="flex w-full flex-col" style={{ maxWidth: `${layoutSp.btnMaxW}px`, gap: `${layoutSp.btnGap}px` }}>
+                  <button onClick={connectWallet} disabled={loading}
+                    className="group flex items-center justify-center gap-3 rounded-full border border-uranus-cyan/60 bg-gradient-to-r from-uranus-cyan to-[#0ea5e9] px-7 text-xs font-bold uppercase tracking-[4px] text-white shadow-[0_0_30px_rgba(34,211,238,0.55)] transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_45px_rgba(34,211,238,0.75)] disabled:opacity-60"
+                    style={{ height: `${layoutSp.btnH}px` }}>
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M18 7.5a6 6 0 00-12 0v2.25A2.25 2.25 0 003.75 12v6A2.25 2.25 0 006 20.25h12A2.25 2.25 0 0020.25 18v-6A2.25 2.25 0 0018 9.75V7.5z" />
+                    </svg>
+                    {loading ? "Connessione..." : "ISCRIVITI ORA CON METAMASK"}
+                  </button>
+
+                  <div className="flex flex-col items-center gap-3 mt-2">
+                    <p className="text-center text-[12px] leading-relaxed text-white/55">
+                      Per accedere a <span className="font-bold text-uranus-cyan">ROG-URANUS</span> è necessario<br />
+                      avere almeno una posizione attiva in <span className="font-bold text-uranus-cyan">Revolution of Giving</span>
+                    </p>
+                    <a href="https://revolutionofgiving.eth.limo" target="_blank" rel="noopener noreferrer"
+                      className="group flex items-center justify-center gap-3 w-full rounded-full border border-uranus-cyan/35 bg-[#030812]/50 px-7 text-xs font-bold uppercase tracking-[4px] text-white/75 backdrop-blur-md transition-all duration-300 hover:border-uranus-cyan/75 hover:bg-uranus-cyan/10 hover:text-white"
+                      style={{ height: `${layoutSp.btnH}px` }}>
+                      <svg className="h-4 w-4 text-uranus-cyan" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A3.75 3.75 0 0012 1.5v0a3.75 3.75 0 00-3.75 3.75V9m-.75 0h9A2.25 2.25 0 0118.75 11.25v7.5A2.25 2.25 0 0116.5 21h-9a2.25 2.25 0 01-2.25-2.25v-7.5A2.25 2.25 0 017.5 9z" />
+                      </svg>
+                      Accedi a ROG
+                    </a>
+                    <button onClick={() => router.push('/?menu=1')}
+                      className="flex items-center gap-1.5 rounded-full px-5 py-2.5 text-white/60 transition-all hover:text-white sm:gap-2"
+                      style={{ background: 'rgba(10, 22, 40, 0.4)', border: '1px solid rgba(34, 211, 238, 0.2)' }}>
+                      <span className="hidden text-lg sm:block">←</span>
+                      <span className="text-[10px] font-bold uppercase tracking-[2px] sm:text-sm">TORNA INDIETRO</span>
+                    </button>
+                  </div>
+                </div>
+
+                {errore && (
+                  <div className="mt-5 max-w-sm rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 backdrop-blur-md">
+                    <p className="text-center text-xs text-red-300">{errore}</p>
+                  </div>
+                )}
+                <div className="mt-8 w-full px-8 text-center sm:absolute sm:bottom-8 sm:left-1/2 sm:mt-0 sm:-translate-x-1/2">
+                  <p className="text-[10px] font-bold uppercase tracking-[6px] text-white/55">Il cambiamento non si aspetta.</p>
+                  <p className="mt-1 text-sm font-bold uppercase tracking-[6px] text-uranus-cyan text-glow-cyan">Entra nella rivoluzione.</p>
+                </div>
+              </div>
+            )}
           </div>
-          <div className="absolute bottom-6 right-6 z-10 flex h-11 w-11 items-center justify-center rounded-full border border-uranus-cyan/70 bg-black/30 text-uranus-cyan backdrop-blur-md">
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25L12 4.5v15l-5.25-3.75H3.75A1.5 1.5 0 012.25 14.25v-4.5a1.5 1.5 0 011.5-1.5h3z" />
-            </svg>
+        </section>
+
+        {/* ══ OVERLAY: CHECKING ══════════════════════════════════════════════ */}
+        {step === "checking" && (
+          <div className="fixed inset-0 z-[200] flex flex-col items-center justify-center gap-5">
+            <div className="w-16 h-16 rounded-full border-2 border-uranus-cyan/20 border-t-uranus-cyan animate-spin"
+              style={{ boxShadow: "0 0 28px rgba(34,211,238,0.5)" }} />
+            <p className="text-sm font-bold uppercase tracking-[4px] text-uranus-cyan/70">
+              {statusMsg || "Verifica in corso..."}
+            </p>
           </div>
-        </div>
-      </section>
+        )}
+
+        {/* ══ OVERLAY: NOT COMMUNITY — popup 2 passi (registrati in ROG + dona ROG Small) ══ */}
+        {step === "not-community" && (
+          <PopupNotCommunity
+            loading={loading}
+            onClose={() => setStep("connect")}
+            onRetry={recheck}
+          />
+        )}
+
+        {/* ══ OVERLAY: NEED ROG SMALL — premium popup ══ */}
+        {step === "need-rog-small" && (
+          <PopupNeedRogSmall
+            loading={loading}
+            onClose={() => setStep("connect")}
+            onRetry={recheck}
+          />
+        )}
+      </>
     );
   }
 
@@ -602,41 +569,6 @@ export default function RegisterPage() {
 
             <div className="relative flex flex-col justify-center px-7 py-10 sm:px-12 sm:py-14" style={{ minHeight: '82vh' }}>
 
-              {/* Pannello spaziatura donazione */}
-              {ENABLE_DONATION_SPACING_PANEL && step === "form" && dPanelOpen && (
-                <div className="fixed left-4 top-4 bottom-4 z-[100] w-[300px] rounded-2xl overflow-hidden flex flex-col" style={{ background: 'rgba(8,12,28,0.95)', backdropFilter: 'blur(20px)', border: '1px solid rgba(34,211,238,0.2)', boxShadow: '0 0 40px rgba(0,0,0,0.5)' }}>
-                  <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
-                    <span className="text-sm font-bold tracking-[2px] text-white">📐 DONO</span>
-                    <div className="flex gap-2">
-                      <button onClick={() => { navigator.clipboard.writeText(JSON.stringify(d, null, 2)); }} className="text-[10px] px-2.5 py-1 rounded-full bg-uranus-cyan/10 border border-uranus-cyan/30 text-uranus-cyan">📋</button>
-                      <button onClick={() => setDPanelOpen(false)} className="w-7 h-7 rounded-full flex items-center justify-center text-white/40 hover:text-white">✕</button>
-                    </div>
-                  </div>
-                  <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4" style={{ scrollbarWidth: 'thin' }}>
-                    {Object.keys(dLabels).map((key) => {
-                      const [min, max] = dRanges[key];
-                      return (
-                        <div key={key}>
-                          <div className="flex items-center justify-between mb-1">
-                            <label className="text-[10px] text-white/50 font-medium">{dLabels[key]}</label>
-                            <span className="text-[11px] font-bold text-uranus-cyan">{d[key as keyof typeof d]}px</span>
-                          </div>
-                          <input type="range" min={min} max={max} value={d[key as keyof typeof d]}
-                            onChange={(e) => setD({ ...d, [key]: Number(e.target.value) })}
-                            className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
-                            style={{ background: `linear-gradient(to right, #22d3ee ${((d[key as keyof typeof d] - min) / (max - min)) * 100}%, rgba(255,255,255,0.08) ${((d[key as keyof typeof d] - min) / (max - min)) * 100}%)`, accentColor: '#22d3ee' }}
-                          />
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                </div>
-              )}
-              {ENABLE_DONATION_SPACING_PANEL && step === "form" && !dPanelOpen && (
-                <button onClick={() => setDPanelOpen(true)} className="fixed bottom-4 left-4 z-[100] w-12 h-12 rounded-full flex items-center justify-center text-white text-lg" style={{ background: 'linear-gradient(135deg, #7c3aed, #22d3ee)', boxShadow: '0 0 20px rgba(124,58,237,0.4)' }}>📐</button>
-              )}
-
               {/* ====== STEP: FORM ====== */}
               {step === "form" && (
                 <div className="flex flex-col animate-[fadeIn_0.4s_ease-out]" style={{ gap: `${d.gap}px` }}>
@@ -688,6 +620,56 @@ Stai per inviare un dono nell&apos;ecosìnostra ROG-URANUS.
                     <p className="text-[10px] text-white/25 mt-2 tracking-[1px]">Rete Polygon</p>
                   </div>
 
+                  {/* ══ SELETTORE TOKEN (USDC / XAUt0) ══ */}
+                  <div
+                    className="flex flex-col items-center p-5 rounded-2xl"
+                    style={{ background: 'rgba(255,255,255,0.025)', border: '1px solid rgba(255,255,255,0.08)' }}
+                  >
+                    <p className="text-[10px] text-white/40 tracking-[3px] font-bold mb-4">SCEGLI IL TOKEN</p>
+                    <div className="flex w-full gap-3">
+                      <button
+                        onClick={() => setSelectedToken("USDC")}
+                        className={`flex-1 flex flex-col items-center gap-1.5 py-4 rounded-xl border transition-all duration-300 ${
+                          selectedToken === "USDC"
+                            ? "border-uranus-cyan/60 bg-uranus-cyan/10 shadow-[0_0_20px_rgba(34,211,238,0.2)]"
+                            : "border-white/10 bg-white/[0.02] hover:border-white/25"
+                        }`}
+                      >
+                        <span className="text-2xl">💵</span>
+                        <span className={`text-sm font-bold tracking-[2px] ${
+                          selectedToken === "USDC" ? "text-uranus-cyan" : "text-white/50"
+                        }`}>USDC</span>
+                        <span className="text-[10px] text-white/30">Stablecoin 1:1 USD</span>
+                      </button>
+                      <button
+                        onClick={() => setSelectedToken("XAUT0")}
+                        className={`flex-1 flex flex-col items-center gap-1.5 py-4 rounded-xl border transition-all duration-300 ${
+                          selectedToken === "XAUT0"
+                            ? "border-yellow-500/60 bg-yellow-500/10 shadow-[0_0_20px_rgba(234,179,8,0.2)]"
+                            : "border-white/10 bg-white/[0.02] hover:border-white/25"
+                        }`}
+                      >
+                        <span className="text-2xl">🪙</span>
+                        <span className={`text-sm font-bold tracking-[2px] ${
+                          selectedToken === "XAUT0" ? "text-yellow-400" : "text-white/50"
+                        }`}>XAUt0</span>
+                        <span className="text-[10px] text-white/30">Oro tokenizzato</span>
+                      </button>
+                    </div>
+
+                    {/* Convertitore approssimativo */}
+                    <div
+                      className="w-full mt-4 flex items-center justify-center gap-3 py-3 px-4 rounded-xl"
+                      style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}
+                    >
+                      <span className="text-[10px] text-white/35 tracking-[1px] font-bold">CAMBIO</span>
+                      <span className="text-xs text-white/60">1 XAUt0</span>
+                      <span className="text-white/25">=</span>
+                      <span className="text-xs font-bold text-uranus-cyan">{GOLD_PRICE_USD.toLocaleString()} USDC</span>
+                      <span className="text-[9px] text-white/20 ml-1">(≈ ${GOLD_PRICE_USD.toLocaleString()})</span>
+                    </div>
+                  </div>
+
                   {/* Quantità del dono */}
                   <div
                     className="flex flex-col items-center p-7 rounded-2xl"
@@ -716,28 +698,37 @@ Stai per inviare un dono nell&apos;ecosìnostra ROG-URANUS.
                     </div>
                   </div>
 
-                  {/* Summary — 2 colonne */}
+                  {/* Summary — 3 righe: valore, totale, equivalente */}
                   <div
-                    className="flex overflow-hidden rounded-2xl"
+                    className="flex flex-col overflow-hidden rounded-2xl"
                     style={{ marginTop: `${d.sumMt}px`, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.025)' }}
                   >
-                    <div className="flex flex-col items-center justify-center flex-1 py-7 border-r border-white/8">
-                      <p className="text-[10px] text-white/45 tracking-[2px] font-bold mb-2">VALORE DONO</p>
-                      <p
-                        className="text-3xl font-bold text-uranus-cyan"
-                        style={{ fontFamily: 'var(--font-orbitron), sans-serif', textShadow: '0 0 18px rgba(34,211,238,0.35)' }}
-                      >
-                        20 USDC
-                      </p>
+                    <div className="flex">
+                      <div className="flex flex-col items-center justify-center flex-1 py-5 border-r border-white/8">
+                        <p className="text-[10px] text-white/45 tracking-[2px] font-bold mb-2">VALORE DONO</p>
+                        <p
+                          className={`text-2xl font-bold ${selectedToken === "XAUT0" ? "text-yellow-400" : "text-uranus-cyan"}`}
+                          style={{ fontFamily: 'var(--font-orbitron), sans-serif', textShadow: selectedToken === "XAUT0" ? '0 0 18px rgba(234,179,8,0.35)' : '0 0 18px rgba(34,211,238,0.35)' }}
+                        >
+                          {selectedToken === "USDC" ? "20 USDC" : `${(20 / GOLD_PRICE_USD).toFixed(6)} XAUt0`}
+                        </p>
+                      </div>
+                      <div className="flex flex-col items-center justify-center flex-1 py-5">
+                        <p className="text-[10px] text-white/45 tracking-[2px] font-bold mb-2">TOTALE DONO</p>
+                        <p
+                          className={`text-2xl font-bold ${selectedToken === "XAUT0" ? "text-yellow-400" : "text-uranus-cyan"}`}
+                          style={{ fontFamily: 'var(--font-orbitron), sans-serif', textShadow: selectedToken === "XAUT0" ? '0 0 18px rgba(234,179,8,0.35)' : '0 0 18px rgba(34,211,238,0.35)' }}
+                        >
+                          {displayAmount}
+                        </p>
+                      </div>
                     </div>
-                    <div className="flex flex-col items-center justify-center flex-1 py-7">
-                      <p className="text-[10px] text-white/45 tracking-[2px] font-bold mb-2">TOTALE DONO</p>
-                      <p
-                        className="text-3xl font-bold text-uranus-cyan"
-                        style={{ fontFamily: 'var(--font-orbitron), sans-serif', textShadow: '0 0 18px rgba(34,211,238,0.35)' }}
-                      >
-                        {posizioni * 20} USDC
-                      </p>
+                    {/* Riga equivalente — sempre visibile per dare riferimento */}
+                    <div className="flex items-center justify-center gap-2 py-3 border-t border-white/6">
+                      <span className="text-[10px] text-white/30 tracking-[1px]">EQUIVALENTE</span>
+                      <span className={`text-sm font-bold ${selectedToken === "XAUT0" ? "text-uranus-cyan" : "text-yellow-400/70"}`}>
+                        {displayEquiv}
+                      </span>
                     </div>
                   </div>
 
@@ -882,6 +873,18 @@ Stai per inviare un dono nell&apos;ecosìnostra ROG-URANUS.
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Torna indietro — fissato in basso al centro */}
+      <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[300] flex justify-center">
+        <button
+          onClick={() => router.back()}
+          className="flex items-center gap-1.5 rounded-full px-5 py-2.5 text-white/60 transition-all hover:text-white sm:gap-2"
+          style={{ background: 'rgba(10, 22, 40, 0.4)', border: '1px solid rgba(34, 211, 238, 0.2)' }}
+        >
+          <span className="hidden text-lg sm:block">←</span>
+          <span className="text-[10px] font-bold uppercase tracking-[2px] sm:text-sm">TORNA INDIETRO</span>
+        </button>
       </div>
     </section>
   );
