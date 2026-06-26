@@ -16,6 +16,7 @@ const pg           = require('./pg-connection-manager');
 const db           = require('./db-manager');
 const tableManager = require('./table-manager');
 const asyncQ       = require('./async-queue');
+const cassaTransfer = require('./cassa-transfer-manager');
 
 // USDC.e (token ROG distribuito) — usato per leggere il saldo reale della cassa
 // nell'invariante di solvibilità. Override via env USDC_CONTRACT_ADDRESS.
@@ -42,8 +43,9 @@ const FIFO = {
   // CASSA
   RIENTRI_CASSA:         18,
   COSTO_RIENTRI_CASSA:  180,
-  ROG_SMALL_CASSA:      100,     // 50 ingressi dual × 2 USDC
+  ROG_SMALL_CASSA:       60,     // 30 ingressi dual × 2 USDC (allineato schema)
   CONTRIBUTO_PHARAON:   100,     // contributo PHARAON
+  SOLE_L0_URANUS_CASSA:  40,     // 2 ingressi dual × 20 USDC → 4 pos a nome CASSA-URANUS
   ACCANTONAMENTO_CASSA: 700,
 
   COSTO_RIENTRO:         10,
@@ -192,6 +194,7 @@ function calcolaUscitaFifo(tipo) {
     rientri: FIFO.RIENTRI_CASSA, costoRientri: FIFO.COSTO_RIENTRI_CASSA,
     tipoRientro: 'CASSA',
     rogSmall: FIFO.ROG_SMALL_CASSA, contributoPharaon: FIFO.CONTRIBUTO_PHARAON,
+    soleL0Uranus: FIFO.SOLE_L0_URANUS_CASSA,
     accantonamentoCassa: FIFO.ACCANTONAMENTO_CASSA, nettoPersona: 0,
   };
 }
@@ -331,6 +334,35 @@ async function processaUscita() {
       }
       console.log(`   ☀️  Sole L0 URANUS: ${uscita.soleL0Uranus} USDC → ${nSole} dual (in coda)`);
     }
+  }
+
+  // 8b. [CASSA] L0 URANUS: 40 USDC → 4 posizioni Sole a nome CASSA-URANUS (allineato schema)
+  if (tipoAccount === 'CASSA' && uscita.soleL0Uranus) {
+    const cassaW0 = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
+    await pg.queryOne(
+      `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, uscita_numero, tipo_uscita)
+       VALUES ('SOLE_L0_URANUS_NETTUNO_CASSA', $1, $2, $3, $4, 'CASSA') RETURNING *`,
+      [testa.wallet, uscita.soleL0Uranus, uscita.soleL0Uranus / FIFO.COSTO_RIENTRO, numeroUscita]
+    );
+    const nPosC = uscita.soleL0Uranus / FIFO.COSTO_RIENTRO;  // 4 posizioni
+    const _nuC = numeroUscita;
+    for (let i = 0; i < nPosC; i++) {
+      const idx = i;
+      asyncQ.enqueue(() => posizionaRientroSoleUnico(cassaW0, `CASSA Sole L0 Uranus #${idx + 1} (Nettuno CASSA #${_nuC})`), `net-sole-cassa-${_nuC}-${idx}`);
+    }
+    console.log(`   ☀️  Sole L0 URANUS (CASSA): ${uscita.soleL0Uranus} USDC → ${nPosC} pos a nome CASSA-URANUS`);
+  }
+
+  // 9. 💸 ROG SMALL → CASSA ROG (reale, persistito + retry). PHARAOH resta accantonato in cassa Uranus.
+  const rogVersoCassaRog = (uscita.rogSmall || 0) + (uscita.rogSmallNuovi || 0);
+  if (rogVersoCassaRog > 0) {
+    try {
+      await cassaTransfer.registraTrasferimento({
+        destinazione: 'ROG', importo: rogVersoCassaRog,
+        origineWallet: testa.wallet, motivo: `ROG_SMALL_NETTUNO_${tipoAccount} #${numeroUscita}`,
+        eventKey: `nettuno-rog-${numeroUscita}`,
+      });
+    } catch (e) { console.error(`   ⚠️  [CassaTransfer] Nettuno ROG: ${e.message}`); }
   }
 
   try { const a = require('./alert-manager'); a.sendAlert('INFO', 'USCITA_FIFO', `FIFO #${numeroUscita}: ${tipoAccount} — ${uscita.nettoPersona} USDC`); } catch (_) {}

@@ -30,6 +30,7 @@ const crossPlatform    = require('./cross-platform-bridge');
 const kycBridge        = require('./kyc-bridge');
 const goldConverter    = require('./gold-converter');
 const giftManager      = require('./gift-manager');
+const cassaTransfer    = require('./cassa-transfer-manager');
 
 // ── RIENTRO A SOLE (L0) ─────────────────────────────────────────
 // Posiziona una singola posizione nella tavola attiva del livello Sole.
@@ -187,6 +188,14 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale) {
       dettaglio: `PHARAOH SINGOLO: ${BRIDGE.L3_PHARAOH_COSTO} USDC accantonati in cassa URANUS (PHARAOH_PENDING), in attesa avvio PHARAOH`
     });
     console.log(`   ✅ ROG SMALL 5 dual (−${BRIDGE.L3_ROG_SMALL_COSTO}) + PHARAOH accantonato in cassa (−${BRIDGE.L3_PHARAOH_COSTO})`);
+
+    // 💸 ROG SMALL → CASSA ROG (reale, persistito + retry).
+    // PHARAOH (100) NON esce: resta accantonato in cassa Uranus (PHARAOH_PENDING_L3)
+    // come dono attivo, fino all'avvio di Pharaoh.
+    await cassaTransfer.registraTrasferimento({
+      destinazione: 'ROG', importo: BRIDGE.L3_ROG_SMALL_COSTO,
+      origineWallet: wallet, motivo: `ROG_SMALL_BRIDGE_L3 ${wallet}`,
+    });
   }
 
   // 3. Cascata FIFO → coda background (non blocca la risposta)
@@ -311,6 +320,11 @@ async function hookUscitaL5(wallet, nome, nettoOriginale) {
     dettaglio: `5 ingressi dual Sole L0 URANUS (10 pos: 5 HUMAN + 5 CASSA) a nome ${wallet.substring(0,10)}`
   });
   console.log(`   ✅ 300 USDC a nome ${nome}: PHARAOH(100) + ROG SMALL(100) + Sole L0(100)`);
+
+  // 💸 ROG SMALL → CASSA ROG (reale, persistito + retry): 100 base + 100 extra = 200.
+  // PHARAOH (100) resta accantonato in cassa Uranus (PHARAOH_PENDING_L5) fino all'avvio di Pharaoh.
+  await cassaTransfer.registraTrasferimento({ destinazione: 'ROG', importo: BRIDGE.L5_ROG_SMALL_COSTO, origineWallet: wallet, motivo: `ROG_SMALL_BRIDGE_L5 ${wallet}` });
+  await cassaTransfer.registraTrasferimento({ destinazione: 'ROG', importo: BRIDGE.L5_ROG_SMALL_EXTRA_COSTO, origineWallet: wallet, motivo: `ROG_SMALL_EXTRA_BRIDGE_L5 ${wallet}` });
 
   // Auto-entry Nettuno per il secondario uscente da L5: 5 ingressi DUAL
   // (5 CASSA + 5 HUMAN = 10 posizioni in coda = 100 USDC), come le altre gestioni.
