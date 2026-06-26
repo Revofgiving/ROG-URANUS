@@ -24,6 +24,7 @@
 const crypto    = require('crypto');
 const pg        = require('./pg-connection-manager');
 const payoutMgr = require('./payout-manager');
+const alerts    = require('./alert-manager');
 
 // Indirizzi casse esterne. Override via env; fallback: indirizzi del movimento.
 const CASSA_ROG_WALLET     = (process.env.CASSA_ROG_WALLET     || '0xD5bCC7acc9d6862c784807134c1F70c3e7f9F790');
@@ -32,11 +33,59 @@ const CASSA_PHARAOH_WALLET = (process.env.CASSA_PHARAOH_WALLET || '0xE1f5A90854C
 const RETRY_INTERVAL_MS = 60 * 1000;   // ritenta i PENDING ogni 60s
 const MAX_RETRIES       = 20;          // dopo N tentativi falliti → FAILED (allertabile)
 const BATCH             = 25;          // PENDING processati per giro
+const ALERT_STATE_KEY   = 'cassa_transfer_failed_alerts';
 
 function walletDestinazione(dest) {
   if (dest === 'ROG')     return CASSA_ROG_WALLET;
   if (dest === 'PHARAOH') return CASSA_PHARAOH_WALLET;
   throw new Error(`Destinazione cassa sconosciuta: ${dest}`);
+}
+
+function abbreviateWallet(wallet) {
+  if (!wallet) return 'n/a';
+  const w = String(wallet);
+  if (w.length <= 12) return w;
+  return `${w.substring(0, 8)}...${w.substring(w.length - 4)}`;
+}
+
+function abbreviateError(err) {
+  if (!err) return 'errore sconosciuto';
+  const s = String(err);
+  return s.length > 120 ? `${s.substring(0, 120)}…` : s;
+}
+
+async function shouldAlertFailedTransfer(id) {
+  const row = await pg.queryOne(`SELECT value FROM state_persistence WHERE key = $1`, [ALERT_STATE_KEY]);
+  const state = row?.value || { ids: [] };
+  const ids = Array.isArray(state.ids) ? state.ids : [];
+  if (ids.includes(id)) return false;
+  ids.push(id);
+  const trimmed = ids.slice(-2000);
+  await pg.query(
+    `INSERT INTO state_persistence (key, value, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
+    [ALERT_STATE_KEY, JSON.stringify({ ids: trimmed })]
+  );
+  return true;
+}
+
+async function alertFailedTransfer(record, errMsg) {
+  try {
+    const allowed = await shouldAlertFailedTransfer(record.id);
+    if (!allowed) return;
+    const text =
+      `⚠️ <b>CASSA TRANSFER FAILED</b>\n` +
+      `ID: <code>${record.id}</code>\n` +
+      `Dest: <b>${record.destinazione}</b>\n` +
+      `Importo: <b>${Number(record.importo).toLocaleString()} USDC</b>\n` +
+      `Wallet: <code>${abbreviateWallet(record.wallet_destinatario)}</code>\n` +
+      `Motivo: ${record.motivo || 'n/a'}\n` +
+      `Errore: ${abbreviateError(errMsg)}`;
+    await alerts.sendTelegramAlert(text);
+  } catch (e) {
+    console.warn('[CassaTransfer] Alert Telegram non inviato:', e.message);
+  }
 }
 
 // ── SCHEMA ──────────────────────────────────────────────────────────
@@ -105,6 +154,7 @@ async function processaUno(record) {
     console.log(`🏦 [CassaTransfer] ${record.importo} USDC → CASSA ${record.destinazione} OK (tx ${res.txHash})`);
     return true;
   }
+  const willFail = (record.retries + 1) >= MAX_RETRIES;
   await pg.query(
     `UPDATE trasferimenti_cassa
        SET retries = retries + 1,
@@ -114,6 +164,9 @@ async function processaUno(record) {
      WHERE id = $1`,
     [record.id, (res && res.error) || 'errore sconosciuto', MAX_RETRIES]
   );
+  if (willFail) {
+    await alertFailedTransfer(record, (res && res.error) || 'errore sconosciuto');
+  }
   console.warn(`🏦 [CassaTransfer] ${record.importo} USDC → CASSA ${record.destinazione} FALLITO: ${(res && res.error) || '??'} (ritento)`);
   return false;
 }
