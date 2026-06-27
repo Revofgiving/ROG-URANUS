@@ -37,6 +37,14 @@ const TREASURY_WALLET = process.env.URANO_FUND_WALLET || '0x00000000000000000000
 const FONDO_WALLET = process.env.FONDO_WALLET || TREASURY_WALLET;
 const CASSA_WALLET = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
 const FONDO_SIGLA = 'A';
+const SYSTEM_WALLETS = new Set([
+  '0x49b21573d1aea396cdb6d2b9d8c8bd5bb25645a4',
+  '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce',
+]);
+
+function isSystemWallet(wallet) {
+  return SYSTEM_WALLETS.has(String(wallet || '').toLowerCase());
+}
 
 // ========================================
 // INIZIALIZZAZIONE
@@ -208,14 +216,18 @@ async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome
   // almeno una donazione ROG completata prima di entrare in URANUS.
   // ═══════════════════════════════════════════════════════════════
   if (!verifier.isDevSkip(txHash)) {
-    const rogStatus = await rogChecker.checkAllPrerequisites(w);
-    if (!rogStatus.canProceed) {
-      const motivi = [];
-      if (!rogStatus.communityRegistered) motivi.push('non iscritto alla community ROG');
-      if (!rogStatus.rogDonationDone) motivi.push('nessuna donazione ROG completata');
-      throw new Error(`Prerequisiti ROG non soddisfatti: ${motivi.join(', ')}. Completa prima il percorso ROG.`);
+    if (isSystemWallet(w)) {
+      console.log(`   [SYSTEM-WALLET] ROG gate bypassato per ${w}`);
+    } else {
+      const rogStatus = await rogChecker.checkAllPrerequisites(w);
+      if (!rogStatus.canProceed) {
+        const motivi = [];
+        if (!rogStatus.communityRegistered) motivi.push('non iscritto alla community ROG');
+        if (!rogStatus.rogDonationDone) motivi.push('nessuna donazione ROG completata');
+        throw new Error(`Prerequisiti ROG non soddisfatti: ${motivi.join(', ')}. Completa prima il percorso ROG.`);
+      }
+      console.log(`   ✅ Prerequisiti ROG verificati (community + ${rogStatus.rogPositions} posizioni ROG)`);
     }
-    console.log(`   \u2705 Prerequisiti ROG verificati (community + ${rogStatus.rogPositions} posizioni ROG)`);
   }
 
 
@@ -310,12 +322,16 @@ async function processaCoppiaEntrata({ wallet, txHash, nome, state, jobId = null
   if (!state.setupDone) {
     // GATE ROG (identico a processaDonoEntrataWallet)
     if (!verifier.isDevSkip(txHash)) {
-      const rogStatus = await rogChecker.checkAllPrerequisites(w);
-      if (!rogStatus.canProceed) {
-        const motivi = [];
-        if (!rogStatus.communityRegistered) motivi.push('non iscritto alla community ROG');
-        if (!rogStatus.rogDonationDone) motivi.push('nessuna donazione ROG completata');
-        throw new Error(`Prerequisiti ROG non soddisfatti: ${motivi.join(', ')}. Completa prima il percorso ROG.`);
+      if (isSystemWallet(w)) {
+        console.log(`   [SYSTEM-WALLET] ROG gate bypassato per ${w}`);
+      } else {
+        const rogStatus = await rogChecker.checkAllPrerequisites(w);
+        if (!rogStatus.canProceed) {
+          const motivi = [];
+          if (!rogStatus.communityRegistered) motivi.push('non iscritto alla community ROG');
+          if (!rogStatus.rogDonationDone) motivi.push('nessuna donazione ROG completata');
+          throw new Error(`Prerequisiti ROG non soddisfatti: ${motivi.join(', ')}. Completa prima il percorso ROG.`);
+        }
       }
     }
 
@@ -1052,10 +1068,14 @@ async function getStatoSistema() {
 async function posizionaDonatoreEntrataCross(wallet, nome) {
   await db.initDatabase();
   const w = wallet.toLowerCase();
-const rogStatus = await rogChecker.checkAllPrerequisites(w);
-if (!rogStatus.canProceed) {
-  throw new Error('Prerequisiti ROG non soddisfatti');
-}
+  if (isSystemWallet(w)) {
+    console.log(`   [SYSTEM-WALLET] ROG gate bypassato per ${w}`);
+  } else {
+    const rogStatus = await rogChecker.checkAllPrerequisites(w);
+    if (!rogStatus.canProceed) {
+      throw new Error('Prerequisiti ROG non soddisfatti');
+    }
+  }
   // Crea account se non esiste
   let account = await db.getAccount(w);
   if (!account) {
