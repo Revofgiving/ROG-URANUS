@@ -164,7 +164,11 @@ function scheduleRetry() {
  */
 async function registerDonation(wallet, amountUsdc, txHash) {
   return fireAndForget(`Donation ${wallet.substring(0, 10)} ${amountUsdc} USDC`, () =>
-    contract.registerDonation(wallet, usdcToWei(amountUsdc), txHashToBytes32(txHash))
+    contract.registerDonation(wallet, usdcToWei(amountUsdc), txHashToBytes32(txHash), {
+      gasLimit: 100000,
+      maxPriorityFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
+      maxFeePerGas: ethers.utils.parseUnits('300', 'gwei'),
+    })
   );
 }
 
