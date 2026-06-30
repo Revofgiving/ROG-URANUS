@@ -44,7 +44,7 @@ const goldConverter    = require('./gold-converter');
 const securityHardener = require('./security-hardener');
 
 const app  = express();
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 4000;
 
 // 🛡️ SECURITY HEADERS — prime di tutto (massima priorità)
