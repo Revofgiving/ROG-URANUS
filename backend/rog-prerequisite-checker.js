@@ -19,6 +19,14 @@ const ROG_BACKEND_URL = (process.env.ROG_BACKEND_URL || '').replace(/\/+$/, '');
 
 // Posizione minima ROG per accedere a URANUS (corrispondente all'8 giugno 2026)
 const POSIZIONE_MINIMA_ROG = 20488;
+// Chiave interna condivisa con ROG per gli endpoint server-to-server protetti
+// (/api/community/status). Inviata come header X-Internal-Key.
+// DEVE coincidere con ROG_INTERNAL_API_KEY configurata sul backend ROG (Coolify).
+const ROG_INTERNAL_API_KEY = process.env.ROG_INTERNAL_API_KEY || '';
+
+function internalHeaders() {
+  return ROG_INTERNAL_API_KEY ? { 'X-Internal-Key': ROG_INTERNAL_API_KEY } : {};
+}
 
 // ── Parametri verifica ON-CHAIN (doppia garanzia: donazione ROG Small ≥ 2 USDC alla cassa) ──
 // Wallet cassa ROG: destinatario delle donazioni ROG Small.
@@ -35,14 +43,12 @@ const BLOCK_8_GIUGNO = process.env.ROG_BLOCK_8_GIUGNO || '0x0';
 // ════════════════════════════════════════════════════════════════════
 // HTTP HELPER
 // ════════════════════════════════════════════════════════════════════
-
-function httpGet(url, timeoutMs = 8000) {
+function httpGet(url, timeoutMs = 8000, headers = {}) {
   return new Promise((resolve) => {
     if (!url) return resolve({ success: false, reason: 'URL vuoto' });
 
     const client = url.startsWith('https') ? require('https') : require('http');
-
-    const req = client.get(url, { timeout: timeoutMs }, (res) => {
+    const req = client.get(url, { timeout: timeoutMs, headers }, (res) => {
       let data = '';
       res.on('data', (chunk) => (data += chunk));
       res.on('end', () => {
@@ -69,8 +75,8 @@ async function checkCommunityRegistration(wallet) {
     return { registered: false, error: 'ROG_BACKEND_URL non configurato' };
   }
 
-  const url = `${ROG_BACKEND_URL}/api/community/is-registered/${wallet}`;
-  const result = await httpGet(url);
+  const url = `${ROG_BACKEND_URL}/api/community/status/${wallet}`;
+  const result = await httpGet(url, 8000, internalHeaders());
 
   if (!result.success) {
     console.warn(`🔐 [ROG-Check] Community status non raggiungibile per ${wallet}: ${result.reason || result.status}`);
