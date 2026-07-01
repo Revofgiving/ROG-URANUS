@@ -41,6 +41,26 @@ async function inviaPagamento(destinatario, importoUsdc, motivo = '') {
     return { success: false, error: 'Parametri non validi' };
   }
 
+  // 🔒 GUARDRAIL SICUREZZA (anti-errore / anti-address-poisoning):
+  //   - il destinatario deve essere un indirizzo Ethereum ben formato;
+  //   - mai pagare wallet in denylist (giro-conti errato, placeholder di sistema).
+  const dest = String(destinatario).toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(dest)) {
+    console.error(`🚨 [PAYOUT] Indirizzo destinatario non valido: ${destinatario}`);
+    return { success: false, error: `Indirizzo destinatario non valido: ${destinatario}` };
+  }
+  const PAYOUT_DENYLIST = new Set([
+    '0xa54fff2ada3aa8a14e62afca8a31010f8b28ee98', // wallet "giro di conti" errato — NON usare mai
+    '0x0000000000000000000000000000000000000000',
+    '0x0000000000000000000000000000000000000001',
+    '0x0000000000000000000000000000000000000002', // vecchio placeholder Cassa
+    '0x1111111111111111111111111111111111111111',
+  ]);
+  if (PAYOUT_DENYLIST.has(dest)) {
+    console.error(`🚨 [PAYOUT] BLOCCATO: destinatario in denylist (${dest}) — ${motivo}`);
+    return { success: false, error: 'Destinatario in denylist — payout bloccato' };
+  }
+
   try {
     const { ethers } = require('ethers');
     const provider = new ethers.providers.JsonRpcProvider(rpcUrl);

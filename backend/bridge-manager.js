@@ -117,47 +117,48 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
   const isSecondario = tipoAccount === 'PERPETUO' || tipoAccount === 'GEMELLO';
 
   // 1. AUTO-ENTRY Nettuno + eventuale Sole L0 URANUS
-  //    PRIMARIO/FONDO : DUAL Nettuno (1 CASSA + 1 HUMAN) = −20 USDC
-  //    SECONDARIO     : 1 HUMAN Nettuno (−10 USDC) + 1 rientro Sole L0 URANUS (−10 USDC)
-  if (tipoAccount !== 'FONDO') {
-    if (!isSecondario) {
-      // PRIMARIO: DUAL entry Nettuno
-      const pCassa = await queue.aggiungiPosizione({
-        wallet: cassaWallet, nome: 'CASSA (da URANO 2 L3)', tipo: 'CASSA',
-      });
-      const pHuman = await queue.aggiungiPosizione({
-        wallet, nome: `${nome} (da URANO 2 L3)`, tipo: 'HUMAN',
-      });
-      nettoFinale -= BRIDGE.COSTO_ENTRY_FIFO;
-      deduzioni.push({
-        tipo: 'ENTRY_FIFO_DUAL', importo: BRIDGE.COSTO_ENTRY_FIFO,
-        dettaglio: `DUAL Nettuno: CASSA pos ${pCassa.posizione}, HUMAN pos ${pHuman.posizione}`
-      });
-      console.log(`   ✅ Nettuno DUAL: CASSA pos ${pCassa.posizione}, HUMAN pos ${pHuman.posizione} (−${BRIDGE.COSTO_ENTRY_FIFO} USDC)`);
-    } else {
-      // SECONDARIO: 1 HUMAN in Nettuno (−10) + 1 rientro Sole L0 URANUS (−10)
-      const pHuman = await queue.aggiungiPosizione({
-        wallet, nome: `${nome} (da URANO 2 L3 Sec.)`, tipo: 'HUMAN',
-      });
-      nettoFinale -= BRIDGE.COSTO_ENTRY_FIFO_SECONDARIO;
-      deduzioni.push({
-        tipo: 'ENTRY_FIFO_HUMAN', importo: BRIDGE.COSTO_ENTRY_FIFO_SECONDARIO,
-        dettaglio: `Nettuno 1 HUMAN: pos ${pHuman.posizione}`
-      });
-      // 1 rientro singolo Sole L0 URANUS = −10 USDC → coda background
-      asyncQ.enqueue(() => posizionaRientroSole(wallet, `${nome} Sole L0 Uranus (da L3 Sec.)`), 'sole-l0-sec-l3');
-      nettoFinale -= BRIDGE.L3_SOLE_L0_SECONDARIO;
-      await pg.queryOne(
-        `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, tipo_uscita)
-         VALUES ('SOLE_L0_URANUS_L3_SEC', $1, $2, 1, $3) RETURNING *`,
-        [wallet, BRIDGE.L3_SOLE_L0_SECONDARIO, tipoAccount]
-      );
-      deduzioni.push({
-        tipo: 'SOLE_L0_URANUS', importo: BRIDGE.L3_SOLE_L0_SECONDARIO,
-        dettaglio: `1 rientro Sole L0 URANUS a nome ${wallet.substring(0, 10)}`
-      });
-      console.log(`   ✅ Secondario: Nettuno HUMAN pos ${pHuman.posizione} (−${BRIDGE.COSTO_ENTRY_FIFO_SECONDARIO}) + Sole L0 URANUS (−${BRIDGE.L3_SOLE_L0_SECONDARIO}) USDC`);
-    }
+  //    PRIMARIO : DUAL Nettuno (1 CASSA + 1 HUMAN) = −20 USDC
+  //    FONDO    : DUAL Nettuno (1 CASSA + 1 Fortunato) MA SENZA costo (LEGGE COMMITTENTE:
+  //               la posizione 0 è l'origine, forma il dual ma non dona i 20 in Nettuno → resta 500)
+  //    SECONDARIO: 1 HUMAN Nettuno (−10 USDC) + 1 rientro Sole L0 URANUS (−10 USDC)
+  if (!isSecondario) {
+    // PRIMARIO / FONDO: DUAL entry Nettuno (1 CASSA + 1 uscente)
+    const pCassa = await queue.aggiungiPosizione({
+      wallet: cassaWallet, nome: 'CASSA (da URANO 2 L3)', tipo: 'CASSA',
+    });
+    const pHuman = await queue.aggiungiPosizione({
+      wallet, nome: `${nome} (da URANO 2 L3)`, tipo: 'HUMAN',
+    });
+    const costoDual = (tipoAccount === 'FONDO') ? 0 : BRIDGE.COSTO_ENTRY_FIFO;
+    nettoFinale -= costoDual;  // FONDO: 0 (non paga il Nettuno); PRIMARIO: −20
+    deduzioni.push({
+      tipo: 'ENTRY_FIFO_DUAL', importo: costoDual,
+      dettaglio: `DUAL Nettuno: CASSA pos ${pCassa.posizione}, HUMAN pos ${pHuman.posizione}${tipoAccount === 'FONDO' ? ' (FONDO/origine: senza costo)' : ''}`
+    });
+    console.log(`   ✅ Nettuno DUAL: CASSA pos ${pCassa.posizione}, HUMAN pos ${pHuman.posizione} (−${costoDual} USDC)`);
+  } else {
+    // SECONDARIO: 1 HUMAN in Nettuno (−10) + 1 rientro Sole L0 URANUS (−10)
+    const pHuman = await queue.aggiungiPosizione({
+      wallet, nome: `${nome} (da URANO 2 L3 Sec.)`, tipo: 'HUMAN',
+    });
+    nettoFinale -= BRIDGE.COSTO_ENTRY_FIFO_SECONDARIO;
+    deduzioni.push({
+      tipo: 'ENTRY_FIFO_HUMAN', importo: BRIDGE.COSTO_ENTRY_FIFO_SECONDARIO,
+      dettaglio: `Nettuno 1 HUMAN: pos ${pHuman.posizione}`
+    });
+    // 1 rientro singolo Sole L0 URANUS = −10 USDC → coda background
+    asyncQ.enqueue(() => posizionaRientroSole(wallet, `${nome} Sole L0 Uranus (da L3 Sec.)`), 'sole-l0-sec-l3');
+    nettoFinale -= BRIDGE.L3_SOLE_L0_SECONDARIO;
+    await pg.queryOne(
+      `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, tipo_uscita)
+       VALUES ('SOLE_L0_URANUS_L3_SEC', $1, $2, 1, $3) RETURNING *`,
+      [wallet, BRIDGE.L3_SOLE_L0_SECONDARIO, tipoAccount]
+    );
+    deduzioni.push({
+      tipo: 'SOLE_L0_URANUS', importo: BRIDGE.L3_SOLE_L0_SECONDARIO,
+      dettaglio: `1 rientro Sole L0 URANUS a nome ${wallet.substring(0, 10)}`
+    });
+    console.log(`   ✅ Secondario: Nettuno HUMAN pos ${pHuman.posizione} (−${BRIDGE.COSTO_ENTRY_FIFO_SECONDARIO}) + Sole L0 URANUS (−${BRIDGE.L3_SOLE_L0_SECONDARIO}) USDC`);
   }
 
   // 2. ROG SMALL (5 ingressi dual) + PHARAOH (100 USDC singolo, ACCANTONATO in cassa: PHARAOH_PENDING)
@@ -215,7 +216,9 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
     );
   } else {
     console.log(`   🎁 DONO PENDENTE: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 180 giorni)`);
-    await giftManager.creaDonoPendente(wallet, nettoFinale, 3, 'PAYOUT_L3', { tipoAccount, deduzioni });
+    // event_key legata al turno d'uscita (numeroUscita): impedisce un SECONDO dono per la
+    // stessa uscita anche con importo diverso (falla che generò 610 poi 500). Anti-doppio-dono.
+    await giftManager.creaDonoPendente(wallet, nettoFinale, 3, 'PAYOUT_L3', { tipoAccount, deduzioni, numeroUscita: `L3-turno-${numeroTurno}` });
   }
 
 
@@ -361,7 +364,8 @@ async function hookUscitaL5(wallet, nome, nettoOriginale, numeroTurno) {
     );
   } else {
     console.log(`   🎁 DONO PENDENTE L5: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 180 giorni)`);
-    await giftManager.creaDonoPendente(wallet, nettoFinale, 5, 'PAYOUT_L5', { deduzioni });
+    // event_key legata al turno d'uscita (anti-doppio-dono, come L3).
+    await giftManager.creaDonoPendente(wallet, nettoFinale, 5, 'PAYOUT_L5', { deduzioni, numeroUscita: `L5-turno-${numeroTurno}` });
   }
  
   await pg.queryOne(

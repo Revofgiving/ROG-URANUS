@@ -1399,19 +1399,43 @@ app.post('/api/admin/recupera-rientro', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
-// ── ADMIN: Migrazione manuale wallet cassa 0x...0002 → 0x4f53... ──
-// Chiama manualmente se vuoi eseguire la migrazione senza restart del server.
+// ── Migrazione placeholder Cassa 0x...0002 → Cassa reale, su TUTTE le tabelle. ──
+// Idempotente (WHERE lower(wallet)=OLD → nessuna riga dopo la prima esecuzione) e
+// atomica (in transazione). Copre: turni, tavole, posizioni, coda_fifo (con tipo→CASSA),
+// flussi_esterni, storico_avanzamenti, bridge_log, accounts (solo se la Cassa reale non
+// è già presente, per non violare il vincolo UNIQUE su accounts.wallet).
+async function migraCassaPlaceholder() {
+  const OLD_CASSA = '0x0000000000000000000000000000000000000002';
+  const NEW_CASSA = (process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce').toLowerCase();
+  if (OLD_CASSA === NEW_CASSA) return { skipped: true, motivo: 'OLD == NEW' };
+  return await pg.transaction(async () => {
+    const counts = {};
+    const upd = async (label, sql) => { const r = await pg.query(sql, [NEW_CASSA, OLD_CASSA]); counts[label] = r.rowCount || 0; };
+    await upd('turni',               `UPDATE turni  SET faraone_wallet=$1 WHERE lower(faraone_wallet)=$2`);
+    await upd('tavole',              `UPDATE tavole SET faraone_wallet=$1 WHERE lower(faraone_wallet)=$2`);
+    await upd('posizioni',           `UPDATE posizioni SET wallet=$1 WHERE lower(wallet)=$2`);
+    await upd('coda_fifo',           `UPDATE coda_fifo SET wallet=$1, tipo='CASSA' WHERE lower(wallet)=$2`);
+    await upd('flussi_esterni',      `UPDATE flussi_esterni SET origine_wallet=$1 WHERE lower(origine_wallet)=$2`);
+    await upd('storico_avanzamenti', `UPDATE storico_avanzamenti SET wallet=$1 WHERE lower(wallet)=$2`);
+    await upd('bridge_log',          `UPDATE bridge_log SET wallet=$1 WHERE lower(wallet)=$2`);
+    // accounts.wallet è UNIQUE: migra il record placeholder SOLO se la Cassa reale non esiste già.
+    const exists = await pg.queryOne(`SELECT 1 FROM accounts WHERE lower(wallet)=$1`, [NEW_CASSA]);
+    if (!exists) {
+      await upd('accounts', `UPDATE accounts SET wallet=$1, tipo='CASSA', nome=COALESCE(nome,'CASSA (Sistema)') WHERE lower(wallet)=$2`);
+    } else {
+      counts.accounts = 0;
+      counts.accounts_note = 'Cassa reale già presente in accounts: record placeholder lasciato per revisione manuale';
+    }
+    return { OLD_CASSA, NEW_CASSA, counts };
+  });
+}
+
+// ── ADMIN: Migrazione manuale wallet cassa 0x...0002 → Cassa reale (tutte le tabelle) ──
 app.post('/api/admin/fix-cassa-wallet', async (req, res) => {
   if (!checkAdmin(req, res)) return;
   try {
-    const OLD_CASSA = '0x0000000000000000000000000000000000000002';
-    const NEW_CASSA = (process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce').toLowerCase();
-    await pg.query(`UPDATE turni  SET faraone_wallet=$1 WHERE faraone_wallet=$2`, [NEW_CASSA, OLD_CASSA]);
-    await pg.query(`UPDATE tavole SET faraone_wallet=$1 WHERE faraone_wallet=$2`, [NEW_CASSA, OLD_CASSA]);
-    await pg.query(`UPDATE posizioni SET wallet=$1 WHERE wallet=$2`, [NEW_CASSA, OLD_CASSA]);
-    const cntT = await pg.queryOne(`SELECT COUNT(*) AS n FROM turni  WHERE faraone_wallet=$1`, [NEW_CASSA]);
-    const cntV = await pg.queryOne(`SELECT COUNT(*) AS n FROM tavole WHERE faraone_wallet=$1`, [NEW_CASSA]);
-    res.json({ success: true, turni_aggiornati: cntT?.n, tavole_aggiornate: cntV?.n, new_wallet: NEW_CASSA });
+    const result = await migraCassaPlaceholder();
+    res.json({ success: true, ...result });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1440,19 +1464,14 @@ app.listen(PORT, async () => {
   try { await db.initDatabase(); } catch (err) { console.error('\u274c DB:', err.message); }
   try { await donationQueue.initQueueTable(); } catch (err) { console.error('\u274c DonationQueue:', err.message); }
   try { await containerManager.initRichiesteVolo(); } catch (err) { console.error('\u274c RichiesteVolo:', err.message); }
-  // 🔧 MIGRAZIONE AUTOMATICA: sostituisce il vecchio placeholder 0x...0002 con la vera Cassa Uranus.
-  //    Si esegue ad ogni avvio (idempotente: UPDATE senza righe = nessun effetto).
+  // 🔧 MIGRAZIONE AUTOMATICA: sostituisce il vecchio placeholder 0x...0002 con la vera Cassa Uranus
+  //    su TUTTE le tabelle. Idempotente + atomica (vedi migraCassaPlaceholder).
   try {
-    const OLD_CASSA = '0x0000000000000000000000000000000000000002';
-    const NEW_CASSA = (process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce').toLowerCase();
-    const rt = await pg.queryOne(`UPDATE turni SET faraone_wallet=$1 WHERE faraone_wallet=$2 RETURNING COUNT(*) OVER() AS n`, [NEW_CASSA, OLD_CASSA]);
-    const rv = await pg.queryOne(`UPDATE tavole SET faraone_wallet=$1 WHERE faraone_wallet=$2 RETURNING COUNT(*) OVER() AS n`, [NEW_CASSA, OLD_CASSA]);
-    const nTurni  = rt?.n  || 0;
-    const nTavole = rv?.n || 0;
-    if (Number(nTurni) > 0 || Number(nTavole) > 0) {
-      console.log(`\u2705 [MIGRAZIONE] Sostituiti ${nTurni} turni + ${nTavole} tavole: 0x...0002 \u2192 Cassa Uranus`);
-    } else {
-      console.log('\u2705 [MIGRAZIONE] Placeholder 0x...0002 gi\u00e0 rimosso (nessuna riga da aggiornare)');
+    const mig = await migraCassaPlaceholder();
+    if (mig && mig.counts) {
+      const tot = Object.values(mig.counts).filter(v => typeof v === 'number').reduce((a, b) => a + b, 0);
+      if (tot > 0) console.log('\u2705 [MIGRAZIONE] Placeholder 0x...0002 \u2192 Cassa Uranus:', JSON.stringify(mig.counts));
+      else console.log('\u2705 [MIGRAZIONE] Placeholder 0x...0002 gi\u00e0 rimosso (nessuna riga da aggiornare)');
     }
   } catch (err) { console.error('\u274c [MIGRAZIONE] Errore:', err.message); }
   // ♻️ Recovery: riprende donazioni multi-coppia interrotte da un riavvio/crash

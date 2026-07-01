@@ -563,18 +563,11 @@ async function posizionaDonatoreEntrata(wallet, nome) {
       console.error(`   avviaNuovoTurnoEntrata procede comunque.`);
     }
 
-    // ── OPZIONE 2: AUTO-ENTRY NETTUNO DA SOLE ─────────────────────
-    // Ogni tavola L0 completata genera 1 posizione HUMAN in Nettuno per l'erede.
-    // Alimenta Nettuno automaticamente senza costo aggiuntivo per l'utente.
-    // Eseguito in coda background: non blocca la risposta né la cascata Blocco 1.
-    const asyncQ = require('./async-queue');
-    const queueMgr = require('./queue-manager');
-    const _eredeW = eredeWallet, _eredeN = nomeErede, _tavolaNum = tavola.numero;
-    asyncQ.enqueue(
-      () => queueMgr.aggiungiPosizione({ wallet: _eredeW, nome: `${_eredeN} Nettuno auto-Sole #${_tavolaNum}`, tipo: 'HUMAN' }),
-      `auto-nettuno-sole-${_tavolaNum}`
-    );
-    console.log(`   🌊 Auto-entry Nettuno in coda: 1 HUMAN (${nomeErede}) da tavola Sole #${tavola.numero}`);
+    // ── NETTUNO: NESSUN auto-entry alla graduazione Sole (LEGGE COMMITTENTE) ────
+    // REGOLA CORRETTA: le posizioni Nettuno (dual = 1 CASSA + 1 uscente) si formano
+    // ESCLUSIVAMENTE alle USCITE da Venere (L3) e Saturno (L5), gestite dai bridge
+    // hookUscitaL3 / hookUscitaL5. L'auto-entry "da Sole" è stato RIMOSSO perché
+    // sovra-popolava Nettuno al momento della donazione/graduazione invece che alle uscite.
 
     // SEMPRE chiamato: garantisce che il nuovo turno ENTRATA venga creato.
     // NOTA: viene chiamato DENTRO la transazione padre (è corretto: le SDOPPIAMENTO
