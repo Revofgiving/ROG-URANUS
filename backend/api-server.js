@@ -16,6 +16,9 @@
  * GET  /api/regole/simula-uscita    — simulatore uscita
  * GET  /api/percorso/:wallet        — predisposizione completa: Sole + Blocco1 + Nettuno
  * GET  /api/async-queue/stato       — stato coda operazioni background
+ * POST /api/posizione-al-volo        — richiedi posizione gratuita a Sole L0 (coda FIFO)
+ * GET  /api/posizione-al-volo/stato/:wallet — stato richiesta
+ * GET  /api/posizione-al-volo/coda  — contatore richieste in attesa (admin)
  * POST /api/admin/blocca            — kill switch
  * POST /api/admin/sblocca
  * GET  /api/admin/stato
@@ -42,6 +45,37 @@ const securityHardener = require('./security-hardener');
 
 const app  = express();
 const PORT = process.env.PORT || 4000;
+
+// 🛡️ SECURITY HEADERS — prime di tutto (massima priorità)
+app.use((req, res, next) => {
+  // Impedisce al sito di essere incluso in iframe (clickjacking)
+  res.setHeader('X-Frame-Options', 'DENY');
+  // Impedisce MIME sniffing (attacchi content-type)
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // XSS protection per browser legacy
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  // Non inviare Referer a siti esterni
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // Disabilita API browser non necessarie
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), bluetooth=()');
+  // HSTS: forza HTTPS per 1 anno (solo in produzione)
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  }
+  // CSP: limita le origini di script, stile, connessioni
+  const cspOrigin = process.env.CORS_ORIGIN && !process.env.CORS_ORIGIN.includes('*')
+    ? process.env.CORS_ORIGIN.split(',').map(o => o.trim()).join(' ')
+    : '*';
+  res.setHeader('Content-Security-Policy',
+    `default-src 'self'; connect-src 'self' ${cspOrigin} https://polygon-mainnet.g.alchemy.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`);
+  // Rimuovi header che rivelano tecnologia server
+  res.removeHeader('X-Powered-By');
+  res.removeHeader('Server');
+  // Cache: no-store per dati sensibili (ogni API endpoint può sovrascrivere)
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  next();
+});
 
 // 🌐 CORS — DEVE essere PRIMA del security hardener
 // così anche le risposte di errore (429, 403) includono gli header CORS
@@ -196,6 +230,84 @@ app.get('/api/account/:wallet', async (req, res) => {
 app.get('/api/contenitori', async (_, res) => {
   try { res.json({ success: true, contenitori: await containerManager.getStatoContenitori() }); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POSIZIONE AL VOLO — coda FIFO richieste gratuite a Sole L0 ──
+
+// Registra richiesta (utente privo di disponibilità economica che vuole entrare)
+app.post('/api/posizione-al-volo', async (req, res) => {
+  const wallet = (req.body?.wallet || '').toLowerCase();
+  const nome   = (req.body?.nome   || '').trim();
+  if (!wallet || !/^0x[a-f0-9]{40}$/.test(wallet))
+    return res.status(400).json({ error: 'Wallet non valido' });
+  try {
+    const result = await containerManager.registraRichiestaPosizioneVolo(wallet, nome || null);
+    const inAttesa = await containerManager.contaRichiesteInAttesa();
+    res.json({
+      success: true,
+      richiesta: result,
+      duplicate: !!result?.duplicate,
+      posizione_in_coda: inAttesa,
+      messaggio: result?.duplicate
+        ? 'Richiesta già presente — lo staff la visualizza e ti risponderà a breve.'
+        : 'Richiesta inviata allo staff. Riceverai la posizione al volo dopo l\'approvazione.',
+    });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Stato richiesta per wallet
+app.get('/api/posizione-al-volo/stato/:wallet', async (req, res) => {
+  const wallet = (req.params.wallet || '').toLowerCase();
+  if (!wallet || !/^0x[a-f0-9]{40}$/.test(wallet))
+    return res.status(400).json({ error: 'Wallet non valido' });
+  try {
+    const stato = await containerManager.getStatoRichiestaVolo(wallet);
+    const inAttesa = await containerManager.contaRichiesteInAttesa();
+    res.json({ success: true, stato: stato || null, richieste_totali_in_attesa: inAttesa });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// Contatore coda (admin o pubblico — nessuna info sensibile)
+app.get('/api/posizione-al-volo/coda', async (_, res) => {
+  try {
+    const inAttesa = await containerManager.contaRichiesteInAttesa();
+    res.json({ success: true, richieste_in_attesa: inAttesa });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── ADMIN: Posizioni al volo — revisione staff ──
+
+// Lista richieste in attesa di approvazione
+app.get('/api/admin/posizione-al-volo/revisione', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    const richieste = await containerManager.getRichiesteInRevisione();
+    res.json({ success: true, richieste, count: richieste.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Approva richiesta → entra in coda FIFO
+app.post('/api/admin/posizione-al-volo/:id/approva', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  const id = Number(req.params.id);
+  if (!id) return res.status(400).json({ error: 'id non valido' });
+  try {
+    const result = await containerManager.approvaRichiesta(id);
+    const inAttesa = await containerManager.contaRichiesteInAttesa();
+    res.json({ success: true, richiesta: result, richieste_in_coda: inAttesa });
+  } catch (e) { res.status(400).json({ success: false, error: e.message }); }
+});
+
+// Rifiuta richiesta
+app.post('/api/admin/posizione-al-volo/:id/rifiuta', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  const id = Number(req.params.id);
+  const note = (req.body?.note || '').trim() || null;
+  if (!id) return res.status(400).json({ error: 'id non valido' });
+  try {
+    const result = await containerManager.rifiutaRichiesta(id, note);
+    res.json({ success: true, richiesta: result });
+  } catch (e) { res.status(400).json({ success: false, error: e.message }); }
 });
 
 // ── STATO ──
@@ -569,9 +681,58 @@ app.get('/api/posizione/:wallet', async (req, res) => {
 });
 
 // ── UTENTI (lista per pannello admin) ──
-// Spostato dal frontend Next.js (route /api/utenti) verso il backend, perché il
-// frontend statico su Pinata non può eseguire route handler server-side.
-// Aggregazione efficiente: un solo JOIN accounts + posizioni invece di N+1 fetch.
+// Il frontend admin fa GET con query params. Il backend accetta sia GET (query)
+// che POST (body) per compatibilità retroattiva.
+async function handleUtenti(params, res) {
+  if (!params._adminOk) { res.status(401).json({ error: 'Chiave admin non valida' }); return; }
+  try {
+    const page = Math.max(1, Number(params.page || 1));
+    const perPage = 20;
+    const search = String(params.search || '').trim().toLowerCase();
+    const statusFilter = String(params.status || '').trim().toLowerCase();
+
+    const rows = await pg.queryMany(
+      `SELECT a.wallet, a.nome, a.status, a.tipo, a.created_at,
+              COUNT(p.id) AS positions_count
+       FROM accounts a
+       LEFT JOIN posizioni p ON p.wallet = a.wallet
+       WHERE a.tipo NOT IN ('FONDO', 'CASSA')
+       GROUP BY a.wallet, a.nome, a.status, a.tipo, a.created_at`
+    );
+
+    const normalizeStatus = (s) =>
+      ['ATTIVO', 'IN_CODA', 'REGISTRATO'].includes(String(s || '').toUpperCase()) ? 'active' : 'inactive';
+
+    let users = rows.map((r) => {
+      const wallet = String(r.wallet || '').toLowerCase();
+      const positionsCount = Number(r.positions_count) || 0;
+      const name = (r.nome || '').trim() || `${wallet.slice(0, 6)}...${wallet.slice(-4)}`;
+      return { id: 0, name, email: wallet,
+        registeredAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
+        positionsCount, totalDonated: positionsCount * 20, status: normalizeStatus(r.status) };
+    });
+
+    if (search) users = users.filter(u => u.name.toLowerCase().includes(search) || u.email.includes(search));
+    if (statusFilter === 'active' || statusFilter === 'inactive') users = users.filter(u => u.status === statusFilter);
+    users.sort((a, b) => Date.parse(b.registeredAt) - Date.parse(a.registeredAt));
+
+    const total = users.length;
+    const totalPages = Math.max(1, Math.ceil(total / perPage));
+    const start = (page - 1) * perPage;
+    const paged = users.slice(start, start + perPage).map((u, idx) => ({ ...u, id: start + idx + 1 }));
+    res.json({ users: paged, total, totalPages });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+}
+
+// GET: chiamato dal pannello admin frontend (query params)
+app.get('/api/utenti', (req, res) => {
+  if (!safeCompare(req.headers['x-admin-key'], process.env.ADMIN_API_KEY)) {
+    return res.status(401).json({ error: 'Chiave admin non valida' });
+  }
+  return handleUtenti({ ...req.query, _adminOk: true }, res);
+});
+
+// POST: retrocompatibilità
 app.post('/api/utenti', async (req, res) => {
   if (!checkAdmin(req, res)) return; // solo admin: richiede header X-Admin-Key === ADMIN_API_KEY
   try {
@@ -716,7 +877,7 @@ app.post('/api/cross/dona', crossPlatform.crossPlatformAuth, async (req, res) =>
     // Crea posizioni reali nel sistema URANUS (Sole L0)
     for (let i = 0; i < n; i++) {
       const rCassa = await flow.posizionaDonatoreEntrataCross(
-        process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002',
+        process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce',
         `CASSA cross da ${from} #${i + 1}`
       );
       const rHuman = await flow.posizionaDonatoreEntrataCross(
@@ -759,7 +920,7 @@ app.post('/api/cross/rog-small', crossPlatform.crossPlatformAuth, async (req, re
 
     for (let i = 0; i < n; i++) {
       await flow.posizionaDonatoreEntrataCross(
-        process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002',
+        process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce',
         `CASSA ROG_SMALL da ${from} #${i + 1}`
       );
       await flow.posizionaDonatoreEntrataCross(w, `ROG_SMALL da ${from} #${i + 1}`);
@@ -790,7 +951,7 @@ app.post('/api/cross/ingresso', crossPlatform.crossPlatformAuth, async (req, res
 
     for (let i = 0; i < n; i++) {
       await flow.posizionaDonatoreEntrataCross(
-        process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002',
+        process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce',
         `CASSA ingresso da ${from} #${i + 1}`
       );
       await flow.posizionaDonatoreEntrataCross(w, `Ingresso da ${from} #${i + 1}`);
@@ -1238,6 +1399,22 @@ app.post('/api/admin/recupera-rientro', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+// ── ADMIN: Migrazione manuale wallet cassa 0x...0002 → 0x4f53... ──
+// Chiama manualmente se vuoi eseguire la migrazione senza restart del server.
+app.post('/api/admin/fix-cassa-wallet', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    const OLD_CASSA = '0x0000000000000000000000000000000000000002';
+    const NEW_CASSA = (process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce').toLowerCase();
+    await pg.query(`UPDATE turni  SET faraone_wallet=$1 WHERE faraone_wallet=$2`, [NEW_CASSA, OLD_CASSA]);
+    await pg.query(`UPDATE tavole SET faraone_wallet=$1 WHERE faraone_wallet=$2`, [NEW_CASSA, OLD_CASSA]);
+    await pg.query(`UPDATE posizioni SET wallet=$1 WHERE wallet=$2`, [NEW_CASSA, OLD_CASSA]);
+    const cntT = await pg.queryOne(`SELECT COUNT(*) AS n FROM turni  WHERE faraone_wallet=$1`, [NEW_CASSA]);
+    const cntV = await pg.queryOne(`SELECT COUNT(*) AS n FROM tavole WHERE faraone_wallet=$1`, [NEW_CASSA]);
+    res.json({ success: true, turni_aggiornati: cntT?.n, tavole_aggiornate: cntV?.n, new_wallet: NEW_CASSA });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── ADMIN: Avvio PHARAOH — rilascia gli accantonamenti PHARAOH verso CASSA PHARAOH ──
 // Sposta il totale PHARAOH accantonato (`PHARAOH_PENDING_*`, da L3/L5/Nettuno) da cassa
 // Uranus → CASSA PHARAOH. Idempotente: chiamate ripetute senza nuovi accantonamenti
@@ -1262,6 +1439,22 @@ app.listen(PORT, async () => {
   console.log(`   Percorso: L0(Sole)→L1(Luna)→L2(Mercurio)→L3(Venere)→L4(Giove)→L5(Saturno) → Nettuno(FIFO) → Uranus\n`);
   try { await db.initDatabase(); } catch (err) { console.error('\u274c DB:', err.message); }
   try { await donationQueue.initQueueTable(); } catch (err) { console.error('\u274c DonationQueue:', err.message); }
+  try { await containerManager.initRichiesteVolo(); } catch (err) { console.error('\u274c RichiesteVolo:', err.message); }
+  // 🔧 MIGRAZIONE AUTOMATICA: sostituisce il vecchio placeholder 0x...0002 con la vera Cassa Uranus.
+  //    Si esegue ad ogni avvio (idempotente: UPDATE senza righe = nessun effetto).
+  try {
+    const OLD_CASSA = '0x0000000000000000000000000000000000000002';
+    const NEW_CASSA = (process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce').toLowerCase();
+    const rt = await pg.queryOne(`UPDATE turni SET faraone_wallet=$1 WHERE faraone_wallet=$2 RETURNING COUNT(*) OVER() AS n`, [NEW_CASSA, OLD_CASSA]);
+    const rv = await pg.queryOne(`UPDATE tavole SET faraone_wallet=$1 WHERE faraone_wallet=$2 RETURNING COUNT(*) OVER() AS n`, [NEW_CASSA, OLD_CASSA]);
+    const nTurni  = rt?.n  || 0;
+    const nTavole = rv?.n || 0;
+    if (Number(nTurni) > 0 || Number(nTavole) > 0) {
+      console.log(`\u2705 [MIGRAZIONE] Sostituiti ${nTurni} turni + ${nTavole} tavole: 0x...0002 \u2192 Cassa Uranus`);
+    } else {
+      console.log('\u2705 [MIGRAZIONE] Placeholder 0x...0002 gi\u00e0 rimosso (nessuna riga da aggiornare)');
+    }
+  } catch (err) { console.error('\u274c [MIGRAZIONE] Errore:', err.message); }
   // ♻️ Recovery: riprende donazioni multi-coppia interrotte da un riavvio/crash
   // (le coppie già piazzate sono persistite; vengono piazzate solo le restanti).
   try { await donationQueue.recoverIncompleteJobs(); } catch (err) { console.error('\u274c DonationQueue recovery:', err.message); }

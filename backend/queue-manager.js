@@ -6,9 +6,9 @@
  *
  * Modello:
  *   Ogni posizione esce quando ha 108 posizioni dedicate dopo di sé.
- *   Uscita HUMAN:     1.080 − 60 (6 rientri DUAL) − 20 (ROG SMALL 10 ing. dual) = 1.000 netto
- *                     distribuzione: 800 in tasca + 100 PHARAOH singolo + 60 ROG SMALL + 40 Sole L0 URANUS
- *   Uscita CASSA:     1.080 − 180 (18 rientri DUAL) − 100 (ROG SMALL 50 ing. dual) − 100 (PHARAON) = 700 accantonamento
+ *   Uscita HUMAN:     1.080 − 60 (6 rientri INDIVIDUAL) − 100 (PHARAOH) − 40 (Sole L0) = 880 netto
+ *                     → − 80 ROG SMALL (20 base + 60 nuovi) = 800 USDC wallet (ACCETTA DONO)
+ *   Uscita CASSA:     1.080 − 180 (18 rientri INDIVIDUAL) − 60 (ROG SMALL) − 100 (PHARAON) − 40 (Sole L0) = 700 accantonamento
  */
 'use strict';
 
@@ -17,6 +17,7 @@ const db           = require('./db-manager');
 const tableManager = require('./table-manager');
 const asyncQ       = require('./async-queue');
 const cassaTransfer = require('./cassa-transfer-manager');
+const crossPlatform = require('./cross-platform-bridge');
 
 // USDC.e (token ROG distribuito) — usato per leggere il saldo reale della cassa
 // nell'invariante di solvibilità. Override via env USDC_CONTRACT_ADDRESS.
@@ -281,13 +282,17 @@ async function processaUscita() {
        VALUES ('ROG_SMALL', $1, $2, $3, $4, $5) RETURNING *`,
       [testa.wallet, uscita.rogSmall, uscita.rogSmall, numeroUscita, tipoAccount]
     );
+    // Notifica ROG: crea posizioni in coppia (utente + piletta) a nome dell'utente
+    crossPlatform.registraRogSmall(testa.wallet, uscita.rogSmall / 2, uscita.rogSmall, `NETTUNO_${tipoAccount}_BASE`);
   }
   if (uscita.contributoPharaon > 0) {
+    // PHARAOH: 1 posizione per CASSA (accantonata in cassa Uranus fino all'avvio PHARAOH)
     await pg.queryOne(
       `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, uscita_numero, tipo_uscita)
-       VALUES ('PHARAON', $1, $2, 1, $3, $4) RETURNING *`,
+       VALUES ('PHARAOH_PENDING_NETTUNO', $1, $2, 1, $3, $4) RETURNING *`,
       [testa.wallet, uscita.contributoPharaon, numeroUscita, tipoAccount]
     );
+    crossPlatform.registraPharaohSuRog(testa.wallet, uscita.contributoPharaon, `PHARAOH_NETTUNO_${tipoAccount}`);
   }
 
   // 7. Aggiorna stato
@@ -299,25 +304,27 @@ async function processaUscita() {
 
   // 8. [HUMAN] Distribuzione netto 1.000 (sessione 4): 800 tasca + 100 PHARAOH + 60 ROG + 40 Sole
   if (tipoAccount === 'HUMAN' && uscita.pharaohHuman) {
-    const cassaW = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
+    const cassaW = process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
 
     // PHARAOH SINGOLO (100 USDC) — ACCANTONATO in cassa URANUS (PHARAOH_PENDING),
     // esattamente come l'uscita L3: i 100 USDC NON vengono ricircolati a Sole; restano
-    // in cassa, riservati al PHARAOH, finché PHARAOH non parte. num_posizioni = 0.
+    // in cassa, riservati al PHARAOH, finché PHARAOH non parte. 1 posizione PHARAOH.
     await pg.queryOne(
       `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, uscita_numero, tipo_uscita)
-       VALUES ('PHARAOH_PENDING_NETTUNO', $1, $2, 0, $3, 'HUMAN') RETURNING *`,
+       VALUES ('PHARAOH_PENDING_NETTUNO', $1, $2, 1, $3, 'HUMAN') RETURNING *`,
       [testa.wallet, uscita.pharaohHuman, numeroUscita]
     );
-    console.log(`   🔮 PHARAOH: ${uscita.pharaohHuman} USDC accantonati in cassa URANUS (PHARAOH_PENDING)`);
+    console.log(`   🔮 PHARAOH: ${uscita.pharaohHuman} USDC accantonati in cassa URANUS (PHARAOH_PENDING) — 1 pos. HUMAN`);
+    crossPlatform.registraPharaohSuRog(testa.wallet, uscita.pharaohHuman, 'PHARAOH_NETTUNO_HUMAN');
 
-    // ROG SMALL nuovi (30 ingressi dual × 2 USDC = 60 USDC)
+    // ROG SMALL nuovi (30 ingressi dual × 2 USDC = 60 USDC) — coppia utente + piletta
     await pg.queryOne(
       `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, uscita_numero, tipo_uscita)
        VALUES ('ROG_SMALL_NETTUNO_HUMAN', $1, $2, $3, $4, 'HUMAN') RETURNING *`,
       [testa.wallet, uscita.rogSmallNuovi, uscita.rogSmallNuovi, numeroUscita]
     );
     console.log(`   📊 ROG SMALL nuovi: ${uscita.rogSmallNuovi} USDC → ${uscita.rogSmallNuovi / 2} ingressi dual`);
+    crossPlatform.registraRogSmall(testa.wallet, uscita.rogSmallNuovi / 2, uscita.rogSmallNuovi, 'NETTUNO_HUMAN_NUOVI');
 
     // Sole L0 URANUS (2 ingressi dual × 20 USDC = 40 USDC) → coda background
     await pg.queryOne(
@@ -338,7 +345,7 @@ async function processaUscita() {
 
   // 8b. [CASSA] L0 URANUS: 40 USDC → 4 posizioni Sole a nome CASSA-URANUS (allineato schema)
   if (tipoAccount === 'CASSA' && uscita.soleL0Uranus) {
-    const cassaW0 = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
+    const cassaW0 = process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
     await pg.queryOne(
       `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, uscita_numero, tipo_uscita)
        VALUES ('SOLE_L0_URANUS_NETTUNO_CASSA', $1, $2, $3, $4, 'CASSA') RETURNING *`,

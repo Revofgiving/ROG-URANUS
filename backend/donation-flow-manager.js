@@ -32,10 +32,15 @@ const payoutMgr       = require('./payout-manager');
 
 // Tesoreria on-chain: dove ARRIVANO e si registrano le donazioni (= destinatario verificato on-chain).
 const TREASURY_WALLET = process.env.URANO_FUND_WALLET || '0x0000000000000000000000000000000000000001';
-// FONDO "A": entita di GIOCO (erede della tavola #1, apre i turni). Puo essere un wallet SEPARATO dalla
-// tesoreria impostando la env FONDO_WALLET; se assente coincide con la tesoreria (comportamento storico).
-const FONDO_WALLET = process.env.FONDO_WALLET || TREASURY_WALLET;
-const CASSA_WALLET = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
+// 🏛️ LEGGE COMMITTENTE: la posizione 0 (Fondo "A", erede della tavola #1, apre i turni) È SEMPRE
+// il wallet Fortunato, a prescindere da qualsiasi env su Coolify. Fortunato detiene la posizione 0;
+// eventuali sue ulteriori posizioni verranno create esplicitamente in futuro. NON sovrascrivere via env.
+// NB: la tesoreria on-chain (TREASURY_WALLET) resta separata e invariata.
+const FORTUNATO_WALLET = '0x49b21573d1aea396cdb6d2b9d8c8bd5bb25645a4';
+const FONDO_WALLET = FORTUNATO_WALLET;
+// 🏛️ LEGGE COMMITTENTE: la posizione "gemella" CASSA che ogni utente forma all'iscrizione è
+// assegnata alla CASSA-URANUS on-chain (= URANO_FUND_WALLET 0x4f53…). Niente più placeholder 0x…0002.
+const CASSA_WALLET = process.env.URANO_FUND_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
 const FONDO_SIGLA = 'A';
 const SYSTEM_WALLETS = new Set([
   '0x49b21573d1aea396cdb6d2b9d8c8bd5bb25645a4',
@@ -681,7 +686,9 @@ async function gestisciUscitaFaraone(turno) {
   // PRIMARIO/SECONDARIO invariati: non hanno mai avuto auto-payout (il guard era === 'FONDO').
 
   await db.completaTurno(turno.id, doniRicevuti);
-  await functionManager.distribuisciCreditiPostTurno(turno.numero_turno);
+  // I 5 crediti L3 (50 USDC) restano STANDBY in pool 5.3 → non creano posizioni singole.
+  // I 50 USDC corrispondenti rimangono in cassa URANUS.
+  // Le posizioni AL VOLO vengono create SOLO come dual (5 CASSA+5 HUMAN) a L4 e L5.
   await avviaNuovoTurnoUrano(turno);
   console.log(`========================================\n`);
   return { uscita, funzioni };
@@ -718,6 +725,47 @@ async function posizionaFaraoneInL4(wallet, nome) {
   return { tavola, entrati };
 }
 
+// ========================================
+// POSIZIONI AL VOLO — L4 (5 CASSA + 5 HUMAN a Sole L0)
+// ========================================
+/**
+ * All'uscita da L4 Giove, il sistema crea 5 dual (5 CASSA + 5 HUMAN) a Sole L0
+ * per chi ha fatto richiesta di una posizione al volo (coda FIFO attiva).
+ *   Priorità: primo in coda richieste_posizioni_volo (IN_ATTESA, FIFO).
+ *   Fallback: Fortunato (posizione 0) se la coda è vuota.
+ */
+async function creaPosizioniAlVoloL4(originWallet) {
+  const pg = require('./pg-connection-manager');
+  const NUM_DUAL = 5;
+  const inAttesa = await containerManager.contaRichiesteInAttesa();
+  console.log(`\n\ud83c\udf1f [L4 AL VOLO] ${NUM_DUAL} DUAL Sole L0 — richieste in coda: ${inAttesa} | fallback: Fortunato (pos.0)`);
+
+  for (let i = 0; i < NUM_DUAL; i++) {
+    // Preleva prossima richiesta dalla coda FIFO; se vuota usa Fortunato (posizione 0)
+    const richiesta = await containerManager.prelevaProssimaRichiestaVolo();
+    const humanWallet = richiesta ? richiesta.wallet : FORTUNATO_WALLET;
+    const humanNome   = richiesta ? (richiesta.nome || `${richiesta.wallet.substring(0, 10)}`) : 'Fortunato (pos.0)';
+
+    if (richiesta) {
+      console.log(`   \u21b3 [${i + 1}/${NUM_DUAL}] HUMAN da coda: ${humanNome} (richiesta #${richiesta.id})`);
+    } else {
+      console.log(`   \u21b3 [${i + 1}/${NUM_DUAL}] coda vuota \u2192 HUMAN assegnato a Fortunato (pos.0)`);
+    }
+
+    // Posizione CASSA prima, HUMAN dopo (ordine standard dual)
+    await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
+    await posizionaDonatoreEntrata(humanWallet, humanNome);
+  }
+
+  // Registra flusso al volo (100 USDC = 10 pos. da pool 5.3)
+  await pg.queryOne(
+    `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, tipo_uscita)
+     VALUES ('POSIZIONI_AL_VOLO_L4', $1, 100, 10, 'L4_VOLO') RETURNING *`,
+    [originWallet]
+  );
+  console.log(`   \u2705 [L4 AL VOLO] ${NUM_DUAL} CASSA + ${NUM_DUAL} HUMAN creati a Sole L0 (100 USDC pool 5.3)`);
+}
+
 async function gestisciUscitaL4(turno) {
   const faraoneWallet = turno.faraone_wallet;
   const account = await db.getAccount(faraoneWallet);
@@ -745,6 +793,11 @@ async function gestisciUscitaL4(turno) {
     await giftManager.creaDonoPendente(faraoneWallet, uscita.netto, 4, 'PAYOUT_L4', { tipoAccount });
   } catch (e) { console.error(`⚠️  [L4] creaDonoPendente: ${e.message}`); }
 
+  // 🌟 Posizioni al volo: 5 CASSA + 5 HUMAN a Sole L0 (pool 5.3, coda FIFO; fallback Fortunato pos.0).
+  try {
+    await creaPosizioniAlVoloL4(faraoneWallet);
+  } catch (e) { console.error(`⚠️  [L4] creaPosizioniAlVoloL4: ${e.message}`); }
+
   await posizionaFaraoneInL5(faraoneWallet, account?.nome || faraoneWallet.substring(0, 10));
   return { uscita };
 }
@@ -759,6 +812,44 @@ async function avviaNextTurnoL4(turnoChiuso) {
   await pg.query(`UPDATE tavole SET tipo='PERCORSO', turno=$1 WHERE id=$2`, [nuovoN, prossima.id]);
   await db.createTurno({ sezione: 'URANO', livello: 4, blocco: 2, numeroTurno: nuovoN, faraoneWallet: prossima.faraone_wallet, faraoneTipo: 'SECONDARIO', sacerdotiNecessari: 3 });
   console.log(`\n🔄 Nuovo turno L4 #${nuovoN}`);
+}
+
+// ========================================
+// POSIZIONI AL VOLO — L5 (5 CASSA + 5 HUMAN a Sole L0)
+// ========================================
+/**
+ * All'uscita da L5 Saturno, il sistema crea 5 dual (5 CASSA + 5 HUMAN) a Sole L0
+ * per chi ha fatto richiesta di una posizione al volo (coda FIFO attiva).
+ *   Priorità: primo in coda richieste_posizioni_volo (IN_ATTESA, FIFO).
+ *   Fallback: Fortunato (posizione 0) se la coda è vuota.
+ */
+async function creaPosizioniAlVoloL5(originWallet) {
+  const pg = require('./pg-connection-manager');
+  const NUM_DUAL = 5;
+  const inAttesa = await containerManager.contaRichiesteInAttesa();
+  console.log(`\n\ud83c\udf1f [L5 AL VOLO] ${NUM_DUAL} DUAL Sole L0 — richieste in coda: ${inAttesa} | fallback: Fortunato (pos.0)`);
+
+  for (let i = 0; i < NUM_DUAL; i++) {
+    const richiesta = await containerManager.prelevaProssimaRichiestaVolo();
+    const humanWallet = richiesta ? richiesta.wallet : FORTUNATO_WALLET;
+    const humanNome   = richiesta ? (richiesta.nome || `${richiesta.wallet.substring(0, 10)}`) : 'Fortunato (pos.0)';
+
+    if (richiesta) {
+      console.log(`   \u21b3 [${i + 1}/${NUM_DUAL}] HUMAN da coda: ${humanNome} (richiesta #${richiesta.id})`);
+    } else {
+      console.log(`   \u21b3 [${i + 1}/${NUM_DUAL}] coda vuota \u2192 HUMAN assegnato a Fortunato (pos.0)`);
+    }
+
+    await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
+    await posizionaDonatoreEntrata(humanWallet, humanNome);
+  }
+
+  await pg.queryOne(
+    `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, tipo_uscita)
+     VALUES ('POSIZIONI_AL_VOLO_L5', $1, 100, 10, 'L5_VOLO') RETURNING *`,
+    [originWallet]
+  );
+  console.log(`   \u2705 [L5 AL VOLO] ${NUM_DUAL} CASSA + ${NUM_DUAL} HUMAN creati a Sole L0 (100 USDC pool 5.3)`);
 }
 
 // ========================================
@@ -815,8 +906,13 @@ async function gestisciUscitaL5(turno) {
   const nomeAccount = account?.nome || faraoneWallet.substring(0, 10);
   const bridgeResult = await bridge.hookUscitaL5(faraoneWallet, nomeAccount, uscita.netto, turno.numero_turno);
 
+  // 🌟 Posizioni al volo: 5 CASSA + 5 HUMAN a Sole L0 (pool 5.3, coda FIFO; fallback Fortunato pos.0).
+  try {
+    await creaPosizioniAlVoloL5(faraoneWallet);
+  } catch (e) { console.error(`⚠️  [L5] creaPosizioniAlVoloL5: ${e.message}`); }
+
   console.log(`🏁 Faraone esce DEFINITIVAMENTE (Uranus) — netto L5 dopo bridge: ${bridgeResult.nettoFinale} USDC`);
-  console.log(`   Totale SUPERURANO: Venere(90) + Giove(400) + Saturno(${bridgeResult.nettoFinale}) + Nettuno(1.000) = ${90 + 400 + bridgeResult.nettoFinale + 1000} USDC`);
+  console.log(`   Totale SUPERURANO: Venere Primario(480) + Venere Secondario(90) + Giove(400) + Saturno(${bridgeResult.nettoFinale}) + Nettuno(800) = ${480 + 90 + 400 + bridgeResult.nettoFinale + 800} USDC`);
   return { uscita, bridgeResult };
 }
 

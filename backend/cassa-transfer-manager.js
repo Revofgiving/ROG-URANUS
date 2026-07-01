@@ -27,7 +27,7 @@ const payoutMgr = require('./payout-manager');
 const alerts    = require('./alert-manager');
 
 // Indirizzi casse esterne. Override via env; fallback: indirizzi del movimento.
-const CASSA_ROG_WALLET     = (process.env.CASSA_ROG_WALLET     || '0xD5bCC7acc9d6862c784807134c1F70c3e7f9F790');
+const CASSA_ROG_WALLET     = (process.env.CASSA_ROG_WALLET     || process.env.ROG_WALLET_CASSA || process.env.ROG_WALLET_ADDRESS || '0xD5bCC7acc9d6862c784807134c1F70c3e7f9F790');
 const CASSA_PHARAOH_WALLET = (process.env.CASSA_PHARAOH_WALLET || '0xE1f5A90854CFC43B936F7be135a84dFEf1A5ab50');
 
 const RETRY_INTERVAL_MS = 60 * 1000;   // ritenta i PENDING ogni 60s

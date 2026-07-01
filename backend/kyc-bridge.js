@@ -78,8 +78,8 @@ async function checkKycForPayout(wallet, amountUsdc) {
   const systemWallets = [
     (process.env.URANO_FUND_WALLET || '').toLowerCase(),
     (process.env.CASSA_WALLET || '').toLowerCase(),
+    '0x49b21573d1aea396cdb6d2b9d8c8bd5bb25645a4', // Fortunato (posizione 0) — NON umano: esente KYC
     '0x0000000000000000000000000000000000000001',
-    '0x0000000000000000000000000000000000000002',
     '0x0000000000000000000000000000000000000003',
   ];
   if (systemWallets.includes(w)) {

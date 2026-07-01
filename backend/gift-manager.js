@@ -21,9 +21,8 @@ const pg = require('./pg-connection-manager');
 const GIFT_EXPIRY_DAYS = 180;                  // 6 mesi per ritirare il dono
 const GIFT_CHECK_INTERVAL_MS = 60 * 60 * 1000; // Controlla scadenze ogni ora
 const READY_CHECK_INTERVAL_MS = 60 * 1000;     // Notifica "dono pronto" ogni 60s
-const CASSA_ROG_WALLET = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
 // Cassa URANUS: i doni non ritirati restano qui (i fondi non escono mai senza ACCETTA DONO).
-const CASSA_URANUS_WALLET = process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
+const CASSA_URANUS_WALLET = process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
 
 // ── INIT DB ──────────────────────────────────────────────────────
 
@@ -195,7 +194,7 @@ async function accettaDono(donoId, wallet) {
     const row = await pg.queryOne(`SELECT status, expires_at FROM doni_pendenti WHERE id = $1 AND wallet = $2`, [donoId, w]);
     if (row && row.status === 'PENDING' && new Date(row.expires_at) < new Date()) {
       await pg.query(`UPDATE doni_pendenti SET status = 'EXPIRED', expired_at = NOW() WHERE id = $1 AND status = 'PENDING'`, [donoId]);
-      throw new Error('Dono scaduto — i 90 giorni sono trascorsi');
+      throw new Error('Dono scaduto — i 180 giorni sono trascorsi');
     }
     throw new Error('Dono non trovato, già accettato o in elaborazione');
   }
@@ -268,9 +267,10 @@ async function notificaDoniPronti() {
     [saldo]
   );
   for (const dono of pronti) {
+    const liv = ({ 3: 'Venere', 4: 'Giove', 5: 'Saturno', 6: 'Nettuno' })[dono.livello] || 'Sistema';
     await inviaMessaggio(dono.wallet, {
-      subject: `🎁 Dono pronto per te!`,
-      content: `Dono pronto per te! Per riceverlo direttamente nel tuo wallet clicca il bottone che si è appena illuminato!!!`,
+      subject: `🎁 Dono #${dono.id} pronto — ${Number(dono.importo).toFixed(0)} USDC`,
+      content: `Il tuo dono #${dono.id} da ${liv} è pronto: ${Number(dono.importo).toFixed(0)} USDC verranno versati nel tuo wallet. Clicca "ACCETTA DONO" per riceverlo (il bottone si è illuminato), entro la scadenza del countdown.`,
       type: 'gift_ready',
       giftId: dono.id,
     });
@@ -285,7 +285,7 @@ async function notificaDoniPronti() {
 // ════════════════════════════════════════════════════════════════════
 
 /**
- * Controlla e scade i doni non accettati dopo 90 giorni.
+ * Controlla e scade i doni non accettati dopo 180 giorni.
  * I doni scaduti vanno in CASSA ROG.
  */
 async function processaScadenze() {

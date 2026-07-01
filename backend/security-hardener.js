@@ -28,28 +28,32 @@ const crypto = require('crypto');
 // ════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-  REFRESH_INTERVAL_MS: 5 * 60 * 1000,  // 5 minuti — auto-refresh
-  NONCE_ROTATION_MS: 5 * 60 * 1000,    // 5 minuti — ruota nonce
-  IP_BAN_THRESHOLD: 500,                // era 50 — scalato ×10 per evento alto traffico
-  IP_BAN_DURATION_MS: 10 * 60 * 1000,  // era 30min — ridotto a 10min
-  BRUTE_FORCE_WINDOW_MS: 60 * 1000,    // finestra 1 minuto
-  BRUTE_FORCE_MAX_ATTEMPTS: 100,        // era 10 — scalato ×10
-  BRUTE_FORCE_LOCKOUT_MS: 5 * 60 * 1000, // era 15min — ridotto a 5min
-  DDOS_WINDOW_MS: 10 * 1000,           // finestra 10 secondi
-  DDOS_MAX_REQUESTS: 1000,             // era 100 — scalato ×10 per evento stasera
-  ANOMALY_SCORE_THRESHOLD: 95,         // era 80 — meno falsi positivi sotto carico
-  MAX_PAYLOAD_SIZE: 50 * 1024,         // 50KB max payload
-  MAX_URL_LENGTH: 2048,                // max URL length
+  REFRESH_INTERVAL_MS: 5 * 60 * 1000,    // 5 minuti — auto-refresh
+  NONCE_ROTATION_MS: 5 * 60 * 1000,      // 5 minuti — ruota nonce
+  IP_BAN_THRESHOLD: 50,                   // ban dopo 50 richieste anomale
+  IP_BAN_DURATION_MS: 30 * 60 * 1000,    // ban 30 minuti
+  BRUTE_FORCE_WINDOW_MS: 60 * 1000,      // finestra 1 minuto
+  BRUTE_FORCE_MAX_ATTEMPTS: 10,           // max 10 tentativi per minuto per IP
+  BRUTE_FORCE_LOCKOUT_MS: 15 * 60 * 1000, // lockout 15 minuti
+  DDOS_WINDOW_MS: 10 * 1000,             // finestra 10 secondi
+  DDOS_MAX_REQUESTS: 100,                 // max 100 richieste per IP in 10s
+  ANOMALY_SCORE_THRESHOLD: 80,            // score anomalia: 80/100
+  MAX_PAYLOAD_SIZE: 50 * 1024,            // 50KB max payload
+  MAX_URL_LENGTH: 2048,                   // max URL length
   SUSPICIOUS_PATTERNS: [
     /(\.\.\/)/, /(<script)/i, /(javascript:)/i, /(on\w+\s*=)/i,
     /(union\s+select)/i, /(drop\s+table)/i, /(insert\s+into)/i,
     /(exec\s*\()/i, /(eval\s*\()/i, /(\$\{)/,
     /(0x[0-9a-f]{40,})/i,  // wallet injection (ma non nei path legittimi)
   ],
+  // IMPORTANTE: /admin/login È ESCLUSO dall'honeypot — è il nostro pannello reale.
+  // Solo path da hacker/bot/scanner vanno qui.
   HONEYPOT_PATHS: [
-    '/admin/login', '/wp-admin', '/wp-login.php', '/.env',
+    '/wp-admin', '/wp-login.php', '/.env',
     '/config.php', '/phpmyadmin', '/api/debug', '/api/test',
     '/.git/config', '/server-status', '/actuator', '/console',
+    '/.htaccess', '/xmlrpc.php', '/cgi-bin/', '/shell.php',
+    '/webshell', '/backdoor', '/passwd', '/etc/passwd',
   ],
 };
 

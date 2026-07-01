@@ -95,11 +95,11 @@ async function distribuisciCrediti(numDoni) {
   }
 
   // 2° FALLBACK: crediti residui → ingresso DUAL ROG-URANUS a Sole (L0)
-  //   1 posizione ROG-URANUS (sistema) + 1 posizione CASSA ROG (sistema) = dual entry
+  //   1 posizione ROG-URANUS (sistema) + 1 posizione CASSA URANUS (sistema) = dual entry
   const residui = Math.min(numDoni, creditiDisponibili) - daDareA51;
   if (residui > 0) {
     console.log(`   ♻️  5.1 vuoto: ${residui} crediti residui → ingresso DUAL ROG-URANUS a Sole (L0)`);
-    const cassaWallet   = process.env.CASSA_WALLET      || '0x0000000000000000000000000000000000000002';
+    const cassaWallet   = process.env.CASSA_WALLET      || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
     const rogUranusWallet = process.env.ROG_URANUS_WALLET || '0x0000000000000000000000000000000000000003';
 
     const creditiResidui = await pg.queryMany(
@@ -114,7 +114,7 @@ async function distribuisciCrediti(numDoni) {
         [rogUranusWallet, credito.id]
       );
 
-      // Ingresso DUAL a Sole: 1 ROG-URANUS + 1 CASSA ROG (10 USDC ciascuno)
+      // Ingresso DUAL a Sole: 1 ROG-URANUS + 1 CASSA URANUS (10 USDC ciascuno)
       try {
         const tableManager = require('./table-manager');
         const dbm = require('./db-manager');
@@ -134,19 +134,19 @@ async function distribuisciCrediti(numDoni) {
           }
         }
 
-        // CASSA ROG dopo (seconda posizione del dual)
+        // CASSA URANUS dopo (seconda posizione del dual)
         const turnoC = await dbm.getTurnoCorrente('ENTRATA', 0);
         if (turnoC) {
           const tavolaC = await tableManager.getTavolaPercorsoAttiva(0, turnoC.numero_turno);
           if (tavolaC) {
             await tableManager.posizionaDonatore({
               tavolaId: tavolaC.id, tavolaNumero: tavolaC.numero, livello: 0,
-              wallet: cassaWallet, nome: `CASSA ROG credito #${credito.id}`,
+              wallet: cassaWallet, nome: `CASSA URANUS credito #${credito.id}`,
               tipo: 'DONATORE', donoImporto: 10,
               turno: turnoC.numero_turno, sdoppiabile: true
             });
             await dbm.incrementSacerdotiEntrati(turnoC.id);
-            console.log(`     → Credito #${credito.id} → DUAL Sole: ROG-URANUS + CASSA ROG`);
+            console.log(`     → Credito #${credito.id} → DUAL Sole: ROG-URANUS + CASSA URANUS`);
           }
         }
       } catch (e) {
@@ -203,8 +203,127 @@ async function getStatoContenitori() {
     contenitore_5:  { tipo: '5',   descrizione: 'Pronti dono 10',  inAttesa: c5 },
     contenitore_51: { tipo: '5.1', descrizione: 'Senza dono (attende crediti)', inAttesa: c51 },
     contenitore_52: { tipo: '5.2', descrizione: 'Pronti dono 50 (Sistema Urano)', inAttesa: c52 },
-    contenitore_53: { tipo: '5.3', descrizione: 'Crediti in standby (se 5.1 vuoto → ROG-CASSA a Sole)', disponibili: crediti }
+    contenitore_53: { tipo: '5.3', descrizione: 'Crediti in standby (se 5.1 vuoto → ROG-URANUS + CASSA URANUS a Sole)', disponibili: crediti }
   };
+}
+
+// ========================================
+// CODA FIFO "POSIZIONE AL VOLO"
+// ========================================
+// Utenti che richiedono una posizione gratuita a Sole L0.
+// Alimentata ogni volta che il sistema crea posizioni "al volo" (es. L4 Giove).
+// Priorità FIFO (data iscrizione); fallback: Fortunato (posizione 0).
+
+async function initRichiesteVolo() {
+  const pg = require('./pg-connection-manager');
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS richieste_posizioni_volo (
+      id           SERIAL PRIMARY KEY,
+      wallet       TEXT NOT NULL,
+      nome         TEXT,
+      status       TEXT NOT NULL DEFAULT 'IN_REVISIONE',
+      note_staff   TEXT,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      assegnata_at TIMESTAMPTZ
+    )
+  `);
+  // Migrazione idempotente: aggiunge note_staff se manca (deploy successivi)
+  await pg.query(`ALTER TABLE richieste_posizioni_volo ADD COLUMN IF NOT EXISTS note_staff TEXT`);
+  await pg.query(`CREATE INDEX IF NOT EXISTS idx_richieste_volo_status ON richieste_posizioni_volo(status)`);
+  // Indice univoco: un wallet non può avere più richieste ATTIVE (IN_REVISIONE o IN_ATTESA) contemporaneamente
+  await pg.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_richieste_volo_wallet_attiva ON richieste_posizioni_volo(wallet) WHERE status IN ('IN_REVISIONE', 'IN_ATTESA')`);
+  console.log('\ud83c\udf1f [PosizioneAlVolo] Tabella richieste pronta');
+}
+
+/**
+ * Registra la richiesta di un utente per una posizione al volo.
+ * Inizia con status IN_REVISIONE (in attesa di approvazione dello staff).
+ * Un wallet non può avere più richieste attive (IN_REVISIONE o IN_ATTESA) contemporaneamente.
+ */
+async function registraRichiestaPosizioneVolo(wallet, nome) {
+  const pg = require('./pg-connection-manager');
+  const w = wallet.toLowerCase();
+  const esistente = await pg.queryOne(
+    `SELECT * FROM richieste_posizioni_volo WHERE wallet = $1 AND status IN ('IN_REVISIONE', 'IN_ATTESA')`, [w]
+  );
+  if (esistente) return { ...esistente, duplicate: true };
+  return pg.queryOne(
+    `INSERT INTO richieste_posizioni_volo (wallet, nome) VALUES ($1, $2) RETURNING *`,
+    [w, nome || `${w.substring(0, 10)}...`]
+  );
+}
+
+/**
+ * Approva una richiesta IN_REVISIONE → passa a IN_ATTESA (entra in coda FIFO).
+ */
+async function approvaRichiesta(id) {
+  const pg = require('./pg-connection-manager');
+  const row = await pg.queryOne(
+    `UPDATE richieste_posizioni_volo SET status = 'IN_ATTESA'
+     WHERE id = $1 AND status = 'IN_REVISIONE' RETURNING *`,
+    [id]
+  );
+  if (!row) throw new Error(`Richiesta #${id} non trovata o non in revisione`);
+  return row;
+}
+
+/**
+ * Rifiuta una richiesta IN_REVISIONE.
+ * @param {string} [note] - Motivazione del rifiuto (opzionale)
+ */
+async function rifiutaRichiesta(id, note) {
+  const pg = require('./pg-connection-manager');
+  const row = await pg.queryOne(
+    `UPDATE richieste_posizioni_volo SET status = 'RIFIUTATA', note_staff = $2
+     WHERE id = $1 AND status = 'IN_REVISIONE' RETURNING *`,
+    [id, note || null]
+  );
+  if (!row) throw new Error(`Richiesta #${id} non trovata o non in revisione`);
+  return row;
+}
+
+/** Ritorna tutte le richieste IN_REVISIONE (lista per lo staff). */
+async function getRichiesteInRevisione() {
+  const pg = require('./pg-connection-manager');
+  return pg.queryMany(
+    `SELECT * FROM richieste_posizioni_volo WHERE status = 'IN_REVISIONE' ORDER BY created_at ASC`
+  );
+}
+
+/**
+ * Preleva il prossimo utente dalla coda FIFO (più vecchio prima).
+ * Marca la richiesta come ASSEGNATA atomicamente (SKIP LOCKED = niente race condition).
+ * Ritorna null se la coda è vuota.
+ */
+async function prelevaProssimaRichiestaVolo() {
+  const pg = require('./pg-connection-manager');
+  return pg.queryOne(`
+    UPDATE richieste_posizioni_volo SET status = 'ASSEGNATA', assegnata_at = NOW()
+    WHERE id = (
+      SELECT id FROM richieste_posizioni_volo
+      WHERE status = 'IN_ATTESA'
+      ORDER BY created_at ASC, id ASC
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING *
+  `);
+}
+
+/** Numero di richieste IN_ATTESA. */
+async function contaRichiesteInAttesa() {
+  const pg = require('./pg-connection-manager');
+  const row = await pg.queryOne(`SELECT COUNT(*)::int AS cnt FROM richieste_posizioni_volo WHERE status = 'IN_ATTESA'`);
+  return Number(row?.cnt) || 0;
+}
+
+/** Stato dell'ultima richiesta di un wallet (qualunque status). */
+async function getStatoRichiestaVolo(wallet) {
+  const pg = require('./pg-connection-manager');
+  return pg.queryOne(
+    `SELECT * FROM richieste_posizioni_volo WHERE wallet = $1 ORDER BY created_at DESC LIMIT 1`,
+    [wallet.toLowerCase()]
+  );
 }
 
 module.exports = {
@@ -212,5 +331,12 @@ module.exports = {
   trasferisciAContenitore52,
   accantonaDoniCredito, distribuisciCrediti, contaCreditiDisponibili,
   verificaSogliaRilascioCrediti, getStatoContenitori,
+  // Coda "posizione al volo"
+  initRichiesteVolo,
+  registraRichiestaPosizioneVolo,
+  approvaRichiesta, rifiutaRichiesta, getRichiesteInRevisione,
+  prelevaProssimaRichiestaVolo,
+  contaRichiesteInAttesa,
+  getStatoRichiestaVolo,
   SOGLIA_PRIMO_TURNO, SOGLIA_TURNI_SUCCESSIVI
 };

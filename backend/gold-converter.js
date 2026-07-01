@@ -6,17 +6,17 @@
  * quanto vale il loro oro in USDC.
  *
  * Esempio output:
- *   "0.004 XAUt0 = 20.00 USDC"
- *   "0.096 XAUt0 = 480.00 USDC"
+ *   "0.005 XAUt0 = 20.00 USDC"
+ *   "0.120 XAUt0 = 480.00 USDC"
  *
  * Il prezzo dell'oro è configurabile via GOLD_PRICE_USD nel .env
- * (default: $5.000 per oncia troy = 1 XAUt0).
+ * (default: $4.000 per oncia troy = 1 XAUt0 — cambio più basso, allineato a verifier e frontend).
  */
 'use strict';
 
 // Prezzo oro in USD per 1 XAUt0 (= 1 oncia troy)
 function getGoldPrice() {
-  return Number(process.env.GOLD_PRICE_USD || 5000);
+  return Number(process.env.GOLD_PRICE_USD || 4000);
 }
 
 /**

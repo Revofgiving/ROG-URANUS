@@ -27,7 +27,6 @@ const db         = require('./db-manager');
 const asyncQ     = require('./async-queue');
 const chainRegistrar   = require('./chain-registrar');
 const crossPlatform    = require('./cross-platform-bridge');
-const kycBridge        = require('./kyc-bridge');
 const goldConverter    = require('./gold-converter');
 const giftManager      = require('./gift-manager');
 const cassaTransfer    = require('./cassa-transfer-manager');
@@ -114,7 +113,7 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
 
   let nettoFinale = nettoOriginale;
   const deduzioni = [];
-  const cassaWallet = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
+  const cassaWallet = process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
   const isSecondario = tipoAccount === 'PERPETUO' || tipoAccount === 'GEMELLO';
 
   // 1. AUTO-ENTRY Nettuno + eventuale Sole L0 URANUS
@@ -202,25 +201,22 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
 
   // 3. Cascata FIFO → coda background (non blocca la risposta)
   asyncQ.enqueue(() => queue.processaUsciteCascata(), 'cascata-fifo-l3');
-  
-// 5. DONO PENDENTE: l'utente deve cliccare ACCETTA DONO (90 giorni)
-console.log(`   🎁 DONO PENDENTE: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 90 giorni)`);
-await giftManager.creaDonoPendente(wallet, nettoFinale, 3, 'PAYOUT_L3', { tipoAccount, deduzioni });
 
-// 4. KYC CHECK — verifica prima del payout
-const kycCheck = await kycBridge.requireKycForPayout(wallet, nettoFinale);
-if (!kycCheck.canProceed) {
-  console.log(`   🪪 PAYOUT L3 SOSPESO — KYC non verificato per ${wallet}`);
-    // Registra payout sospeso nel bridge log, ma non blocca il flusso
+  // 4. DONO PENDENTE: solo per wallet NON di sistema.
+  //    CASSA URANUS (0x4f53...): è già la treasury → il netto resta in cassa senza payout circolare.
+  //    Fortunato e tutti gli altri wallet: normale ACCETTA DONO.
+  const isCassaWallet = wallet.toLowerCase() === (process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce').toLowerCase();
+  if (isCassaWallet) {
+    console.log(`   🏦 CASSA URANUS: netto ${nettoFinale} USDC rimane accantonato in cassa (nessun payout circolare).`);
     await pg.queryOne(
-      `INSERT INTO bridge_log (wallet, evento, netto_originale, deduzioni_totali, netto_finale, dettagli)
-       VALUES ($1, 'PAYOUT_L3_KYC_PENDING', $2, $3, $4, $5) RETURNING *`,
-      [wallet, nettoOriginale, nettoOriginale - nettoFinale, nettoFinale, JSON.stringify({ kycCheck, tipoAccount, deduzioni })]
+      `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, tipo_uscita)
+       VALUES ('CASSA_L3_ACCANTONATO', $1, $2, 0, $3) RETURNING *`,
+      [wallet, nettoFinale, tipoAccount]
     );
-    return { nettoOriginale, deduzioni, nettoFinale, kycPending: true, kycCheck };
+  } else {
+    console.log(`   🎁 DONO PENDENTE: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 180 giorni)`);
+    await giftManager.creaDonoPendente(wallet, nettoFinale, 3, 'PAYOUT_L3', { tipoAccount, deduzioni });
   }
-
-  // 5. DONO PENDENTE: l'utente deve cliccare ACCETTA DONO (90 giorni)
 
 
   // Registra nel bridge log
@@ -265,7 +261,7 @@ async function hookUscitaL5(wallet, nome, nettoOriginale, numeroTurno) {
 
   let nettoFinale = nettoOriginale;
   const deduzioni = [];
-  const cassaWallet = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
+  const cassaWallet = process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
 
   // ── ROG SMALL (50 ingressi dual = 100 posizioni) — 100 USDC ──────────
   nettoFinale -= BRIDGE.L5_DEDUZIONE_TOTALE;  // 400 = 100 (ROG SMALL) + 300 (a nome utente)
@@ -339,7 +335,7 @@ async function hookUscitaL5(wallet, nome, nettoOriginale, numeroTurno) {
 
   // Auto-entry Nettuno per il secondario uscente da L5: 5 ingressi DUAL
   // (5 CASSA + 5 HUMAN = 10 posizioni in coda = 100 USDC), come le altre gestioni.
-  const cassaFifoL5 = process.env.CASSA_WALLET || '0x0000000000000000000000000000000000000002';
+  const cassaFifoL5 = process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
   for (let i = 0; i < BRIDGE.L5_NETTUNO_NUM / 2; i++) {
     await queue.aggiungiPosizione({ wallet: cassaFifoL5, nome: `CASSA (da L5) #${i+1}`, tipo: 'CASSA' });
     await queue.aggiungiPosizione({ wallet, nome: `${nome} (da L5) #${i+1}`, tipo: 'HUMAN' });
@@ -354,21 +350,19 @@ async function hookUscitaL5(wallet, nome, nettoOriginale, numeroTurno) {
   // Cascata FIFO L5 → coda background
   asyncQ.enqueue(() => queue.processaUsciteCascata(), 'cascata-fifo-l5');
 
-  // KYC CHECK L5 — verifica prima del payout
- console.log(`   🎁 DONO PENDENTE L5: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 90 giorni)`);
-  await giftManager.creaDonoPendente(wallet, nettoFinale, 5, 'PAYOUT_L5', { deduzioni });  
-  const kycCheckL5 = await kycBridge.requireKycForPayout(wallet, nettoFinale);
-  if (!kycCheckL5.canProceed) {
-    console.log(`   🪪 PAYOUT L5 SOSPESO — KYC non verificato per ${wallet}`);
+  // DONO PENDENTE L5 — solo per wallet NON di sistema (stessa logica di L3).
+  const isCassaL5 = wallet.toLowerCase() === (process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce').toLowerCase();
+  if (isCassaL5) {
+    console.log(`   🏦 CASSA URANUS L5: netto ${nettoFinale} USDC rimane accantonato in cassa.`);
     await pg.queryOne(
-      `INSERT INTO bridge_log (wallet, evento, netto_originale, deduzioni_totali, netto_finale, dettagli)
-       VALUES ($1, 'PAYOUT_L5_KYC_PENDING', $2, $3, $4, $5) RETURNING *`,
-      [wallet, nettoOriginale, nettoOriginale - nettoFinale, nettoFinale, JSON.stringify({ kycCheck: kycCheckL5, deduzioni })]
+      `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, tipo_uscita)
+       VALUES ('CASSA_L5_ACCANTONATO', $1, $2, 0, 'SECONDARIO') RETURNING *`,
+      [wallet, nettoFinale]
     );
-    return { nettoOriginale, deduzioni, nettoFinale, kycPending: true, kycCheck: kycCheckL5 };
+  } else {
+    console.log(`   🎁 DONO PENDENTE L5: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 180 giorni)`);
+    await giftManager.creaDonoPendente(wallet, nettoFinale, 5, 'PAYOUT_L5', { deduzioni });
   }
-
-  // DONO PENDENTE L5: l'utente deve cliccare ACCETTA DONO (90 giorni)
  
   await pg.queryOne(
     `INSERT INTO bridge_log (wallet, evento, netto_originale, deduzioni_totali, netto_finale, dettagli)
