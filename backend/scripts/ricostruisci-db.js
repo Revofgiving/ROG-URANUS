@@ -93,6 +93,21 @@ async function main() {
   await db.initDatabase();
   await giftManager.initGiftTables();
 
+  // ── RESET (opzionale): cancella TUTTI i dati vecchi via TRUNCATE di ogni tabella public.
+  // Si usa TRUNCATE (non DROP SCHEMA) perché droppare lo schema corrompe il search_path
+  // delle connessioni del pool ("no schema has been selected") e fa fallire in silenzio i
+  // savepoint della cascata. TRUNCATE mantiene schema/search_path intatti e resetta i serial.
+  // USARE SOLO DOPO BACKUP (snapshot Coolify). Le tabelle sono già create da initDatabase sopra.
+  if (process.env.RESET === 'true') {
+    console.log('🗑️  RESET=true → CANCELLO tutti i dati vecchi (TRUNCATE di tutte le tabelle)...');
+    await pg.query(`DO $$ DECLARE r RECORD; BEGIN
+      FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname='public') LOOP
+        EXECUTE 'TRUNCATE TABLE public.' || quote_ident(r.tablename) || ' RESTART IDENTITY CASCADE';
+      END LOOP;
+    END $$;`);
+    console.log('✅ Dati vecchi cancellati (tutte le tabelle azzerate)');
+  }
+
   // ── GUARD: DB deve essere vuoto (salvo FORCE) ──
   const nPos = await pg.queryOne(`SELECT COUNT(*)::int n FROM posizioni`);
   if (nPos.n > 0 && process.env.FORCE !== 'true') {
