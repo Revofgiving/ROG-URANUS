@@ -168,14 +168,19 @@ async function main() {
 
     const fifo_tot = await count(client, `SELECT COUNT(*) FROM coda_fifo`);
     const fifo_in_coda = await count(client, `SELECT COUNT(*) FROM coda_fifo WHERE status='IN_CODA'`);
-    const fifo_no_uscita_no_rientro = await count(client,
-      `SELECT COUNT(*) FROM coda_fifo WHERE status='IN_CODA' AND is_rientro=FALSE AND uscita_numero IS NULL`);
+    // Bug entries = create dall'auto-entry Sole (nome contiene 'Nettuno auto-Sole')
+    const fifo_bug = await count(client,
+      `SELECT COUNT(*) FROM coda_fifo WHERE nome LIKE '%Nettuno auto-Sole%'`);
+    // Legittime = create dalle uscite L3/L5 (nome contiene 'da URANO 2')
+    const fifo_legittime = await count(client,
+      `SELECT COUNT(*) FROM coda_fifo WHERE nome LIKE '%(da URANO 2%'`);
     const fifo_cassa_ok = await count(client,
       `SELECT COUNT(*) FROM coda_fifo WHERE lower(wallet)=$1`, [CASSA_REALE]);
 
     console.log(`  coda_fifo totale:                      ${fifo_tot}`);
     console.log(`  coda_fifo IN_CODA:                     ${fifo_in_coda}`);
-    console.log(`  coda_fifo candidati eccedenti          ${fifo_no_uscita_no_rientro}`);
+    console.log(`  coda_fifo bug (auto-Sole da rimuovere): ${fifo_bug}`);
+    console.log(`  coda_fifo legittime (da L3/L5):        ${fifo_legittime}`);
     console.log(`  coda_fifo con wallet CASSA reale:      ${fifo_cassa_ok}`);
 
     // Dettaglio per tipo
@@ -185,30 +190,47 @@ async function main() {
       console.log(`    tipo ${r.tipo.padEnd(8)} → ${r.n} posizioni`);
     }
 
-    if (fifo_in_coda > 0) {
-      if (REMOVE_NETTUNO && !DRY_RUN) {
-        // Rimuove SOLO le posizioni senza uscita assegnata e non rientri
-        // (le posizioni già "consumate" da uscite hanno uscita_numero NOT NULL → safe to keep)
-        const del = await client.query(
-          `DELETE FROM coda_fifo WHERE status='IN_CODA' AND is_rientro=FALSE AND uscita_numero IS NULL`);
-        console.log(`\n  ✅ RIMOSSI ${del.rowCount} record Nettuno eccedenti`);
-        // Reset stato FIFO
-        await client.query(`
-          UPDATE state_persistence SET value=jsonb_set(
-            jsonb_set(value, '{prossima_posizione}', '0'),
-            '{rientri_pool}', '0'
-          ) WHERE key='fifo_sistema'`);
-        console.log(`  ✅ Stato FIFO azzerato (prossima_posizione=0, rientri_pool=0)`);
-      } else if (REMOVE_NETTUNO) {
-        console.log(`\n  ℹ️  DRY_RUN: verrebbero rimossi ${fifo_no_uscita_no_rientro} record Nettuno eccedenti`);
-      } else {
-        console.log(`\n  ⚠️  Nettuno ha ${fifo_in_coda} posizioni in coda.`);
-        console.log(`     Per rimuovere le eccedenti: aggiungere REMOVE_NETTUNO=true`);
-        console.log(`     ‼️  Farlo SOLO se sicuri che siano state create dal vecchio auto-entry`);
-        console.log(`     ‼️  (confronta con l'export on-chain / mappa definitiva prima)`);
+    // Lista entries legittime (da conservare sempre)
+    const legittime_rows = await client.query(
+      `SELECT posizione, tipo, wallet, nome FROM coda_fifo WHERE nome LIKE '%(da URANO 2%' ORDER BY posizione`);
+    if (legittime_rows.rows.length > 0) {
+      console.log(`\n  Entries legittime (conservate):`); 
+      for (const r of legittime_rows.rows) {
+        console.log(`    pos ${r.posizione} ${r.tipo} ${r.wallet.substring(0,14)}… ${r.nome}`);
       }
+    }
+
+    if (fifo_bug > 0) {
+      if (REMOVE_NETTUNO && !DRY_RUN) {
+        // Rimuove SOLO le posizioni create dall'auto-entry Sole (bug).
+        // CONSERVA le entries legittime create da hookUscitaL3/hookUscitaL5
+        // (nome LIKE '%(da URANO 2%') — queste sono le posizioni Nettuno reali.
+        const del = await client.query(
+          `DELETE FROM coda_fifo WHERE nome LIKE '%Nettuno auto-Sole%'`);
+        console.log(`\n  ✅ RIMOSSI ${del.rowCount} record Nettuno bug (auto-Sole)`);
+        // Reset solo rientri_pool (prossima_posizione resta per le entries legittime ancora presenti)
+        await client.query(`
+          UPDATE state_persistence SET value=jsonb_set(value, '{rientri_pool}', '0')
+          WHERE key='fifo_sistema'`);
+        console.log(`  ✅ rientri_pool azzerato`);
+        // Mostra cosa rimane
+        const rimasti = await client.query(
+          `SELECT posizione, tipo, nome FROM coda_fifo ORDER BY posizione`);
+        console.log(`  Rimaste ${rimasti.rows.length} entries:`);
+        for (const r of rimasti.rows) {
+          console.log(`    pos ${r.posizione} ${r.tipo} ${r.nome}`);
+        }
+      } else if (REMOVE_NETTUNO) {
+        console.log(`\n  ℹ️  DRY_RUN: verrebbero rimossi ${fifo_bug} record bug (auto-Sole), conservate ${fifo_legittime} legittime`);
+      } else {
+        console.log(`\n  ⚠️  Nettuno ha ${fifo_bug} bug entries (auto-Sole) da rimuovere.`);
+        console.log(`     Per rimuoverle: aggiungere REMOVE_NETTUNO=true`);
+        console.log(`     Le ${fifo_legittime} entries legittime (da L3/L5) verranno conservate.`);
+      }
+    } else if (fifo_in_coda > 0) {
+      console.log(`\n  ✅ Nettuno OK — ${fifo_in_coda} entries, tutte legittime (nessuna auto-Sole)`);
     } else {
-      console.log(`\n  ✅ Nettuno già vuoto — nessuna azione necessaria`);
+      console.log(`\n  ✅ Nettuno vuoto — nessuna azione necessaria`);
     }
 
     // ════════════════════════════════════════════════════════════════
