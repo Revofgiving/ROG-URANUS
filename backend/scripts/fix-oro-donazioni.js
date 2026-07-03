@@ -20,12 +20,13 @@
  */
 
 const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+const ROOT = path.resolve(__dirname, '..');
+require('dotenv').config({ path: path.join(ROOT, '.env') });
 
-const pg           = require('./pg-connection-manager');
-const flow         = require('./donation-flow-manager');
-const db           = require('./db-manager');
-const { URANUS_CASSA_WALLET } = require('./wallet-cassa');
+const pg           = require(path.join(ROOT, 'pg-connection-manager'));
+const flow         = require(path.join(ROOT, 'donation-flow-manager'));
+const db           = require(path.join(ROOT, 'db-manager'));
+const { URANUS_CASSA_WALLET } = require(path.join(ROOT, 'wallet-cassa'));
 
 const DRY_RUN = process.env.APPLY !== 'true';
 
@@ -50,11 +51,6 @@ async function main() {
 
   hdr('§ 1. STATO ATTUALE DONAZIONI ORO');
 
-  const client = require('pg').Client
-    ? new (require('pg').Client)({ connectionString: process.env.DATABASE_URL })
-    : null;
-
-  // Usiamo pg-connection-manager direttamente
   const rows = await pg.queryMany(
     'SELECT id, donor_wallet, importo, tx_hash FROM donazioni WHERE id = ANY($1) ORDER BY id',
     [[1, 7, 17, 18]]
