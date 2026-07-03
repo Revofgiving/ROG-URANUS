@@ -11,7 +11,7 @@
  *   Cassa: 300 (Funzioni) → Netto Primario: 610 | Secondario: 110 (+500 per L4)
  *
  * BLOCCO 2: Giove (L4,3) → Saturno (L5,3)
- *   L4: 3×500 = 1500 → netto 400 | L5: 3×1000 = 3000 → netto 1900
+ *   L4: 3×500 = 1500 → netto 400 | L5: 3×1000 = 3000 → netto 2900 (scelta URANUS: 10 crediti, non 110)
  *
  * Ogni posizione (HUMAN e CASSA) percorre lo STESSO identico percorso.
  */
@@ -29,9 +29,10 @@ const chainRegistrar  = require('./chain-registrar');
 const goldConverter   = require('./gold-converter');
 const rogChecker      = require('./rog-prerequisite-checker');
 const payoutMgr       = require('./payout-manager');
+const { URANUS_CASSA_WALLET } = require('./wallet-cassa'); // 🏛️ UNICO riferimento cassa Uranus
 
-// Tesoreria on-chain: dove ARRIVANO e si registrano le donazioni (= destinatario verificato on-chain).
-const TREASURY_WALLET = process.env.URANO_FUND_WALLET || '0x0000000000000000000000000000000000000001';
+// Tesoreria on-chain: dove ARRIVANO e si registrano le donazioni. Coincide con la CASSA Uranus.
+const TREASURY_WALLET = URANUS_CASSA_WALLET;
 // 🏛️ LEGGE COMMITTENTE: la posizione 0 (Fondo "A", erede della tavola #1, apre i turni) È SEMPRE
 // il wallet Fortunato, a prescindere da qualsiasi env su Coolify. Fortunato detiene la posizione 0;
 // eventuali sue ulteriori posizioni verranno create esplicitamente in futuro. NON sovrascrivere via env.
@@ -39,8 +40,8 @@ const TREASURY_WALLET = process.env.URANO_FUND_WALLET || '0x00000000000000000000
 const FORTUNATO_WALLET = '0x49b21573d1aea396cdb6d2b9d8c8bd5bb25645a4';
 const FONDO_WALLET = FORTUNATO_WALLET;
 // 🏛️ LEGGE COMMITTENTE: la posizione "gemella" CASSA che ogni utente forma all'iscrizione è
-// assegnata alla CASSA-URANUS on-chain (= URANO_FUND_WALLET 0x4f53…). Niente più placeholder 0x…0002.
-const CASSA_WALLET = process.env.URANO_FUND_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
+// assegnata alla CASSA URANUS on-chain (0x4f53…). Unico riferimento: URANUS_CASSA_WALLET.
+const CASSA_WALLET = URANUS_CASSA_WALLET;
 const FONDO_SIGLA = 'A';
 const SYSTEM_WALLETS = new Set([
   '0x49b21573d1aea396cdb6d2b9d8c8bd5bb25645a4',
@@ -242,10 +243,14 @@ async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome
     importoTotale = rules.IMPORTI.COSTO_PER_PERSONA * n;
   } else {
     const verifica = await verifier.verificaDonazione({ txHash, walletMittente: w, importoMinimo: rules.IMPORTI.COSTO_PER_PERSONA });
-    importoTotale = verifica.importoEffettivo;
     // Usa le coppie calcolate dal verificatore: USDC = importo/20, XAUT0 = (importo × prezzo oro USD)/20.
-    // NON ricalcolare da importoEffettivo (che per XAUT0 è in once d'oro, non in USD).
+    // NON ricalcolare n da importoEffettivo (che per XAUT0 è in once d'oro, non in USD).
     n = Math.max(1, Number(verifica.numeroPosizioni) || 1);
+    // importoTotale salvato in DB = USDC-equivalente (n × 20).
+    // Per XAUt0 l'importoEffettivo è in once d'oro → userebbe valori come 0.017 invece di 80 USDC.
+    importoTotale = verifica.tokenKey === 'XAUT0'
+      ? n * rules.IMPORTI.COSTO_PER_PERSONA
+      : verifica.importoEffettivo;
   }
 
   console.log(`\n🌀 DONO ${n} COPPIA${n > 1 ? 'E' : ''} — wallet: ${w} — ${importoTotale} USDC`);
@@ -347,8 +352,11 @@ async function processaCoppiaEntrata({ wallet, txHash, nome, state, jobId = null
       state.token = 'USDC';
     } else {
       const verifica = await verifier.verificaDonazione({ txHash, walletMittente: w, importoMinimo: rules.IMPORTI.COSTO_PER_PERSONA });
-      state.importoTotale = verifica.importoEffettivo;
       state.n = Math.max(1, Number(verifica.numeroPosizioni) || 1);
+      // USDC-equivalente per DB: per XAUt0 importoEffettivo è in once d'oro, non in USDC.
+      state.importoTotale = verifica.tokenKey === 'XAUT0'
+        ? state.n * rules.IMPORTI.COSTO_PER_PERSONA
+        : verifica.importoEffettivo;
       state.token = verifica.token || 'USDC';
     }
 

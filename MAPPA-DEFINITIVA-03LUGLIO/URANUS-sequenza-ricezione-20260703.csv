@@ -1,0 +1,18 @@
+faraone_posizione,turno,tipo,soglia_uscita_venere_posizione,raggiunta,tipo_dono,importo_usdc,stato
+0,1,FONDO,114,SI,payout,500,"PAGATO (500, tx 0x1ae343…, 22/06)"
+1,2,CASSA,192,SI,accantonamento,,MATURATA → ACCANTONAMENTO (nessun payout)
+2,3,HUMAN,270,NO,payout,480,FUTURA (soglia non raggiunta)
+3,4,CASSA,348,NO,accantonamento,,FUTURA (soglia non raggiunta)
+4,5,HUMAN,426,NO,payout,480,FUTURA (soglia non raggiunta)
+5,6,CASSA,504,NO,accantonamento,,FUTURA (soglia non raggiunta)
+6,7,HUMAN,582,NO,payout,480,FUTURA (soglia non raggiunta)
+7,8,CASSA,660,NO,accantonamento,,FUTURA (soglia non raggiunta)
+8,9,HUMAN,738,NO,payout,480,FUTURA (soglia non raggiunta)
+9,10,CASSA,816,NO,accantonamento,,FUTURA (soglia non raggiunta)
+10,11,HUMAN,894,NO,payout,480,FUTURA (soglia non raggiunta)
+11,12,CASSA,972,NO,accantonamento,,FUTURA (soglia non raggiunta)
+12,13,HUMAN,1050,NO,payout,480,FUTURA (soglia non raggiunta)
+13,14,CASSA,1128,NO,accantonamento,,FUTURA (soglia non raggiunta)
+14,15,HUMAN,1206,NO,payout,480,FUTURA (soglia non raggiunta)
+15,16,CASSA,1284,NO,accantonamento,,FUTURA (soglia non raggiunta)
+16,17,HUMAN,1362,NO,payout,480,FUTURA (soglia non raggiunta)

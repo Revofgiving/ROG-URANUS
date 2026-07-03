@@ -12,6 +12,7 @@
 'use strict';
 
 const db = require('./db-manager');
+const { URANUS_CASSA_WALLET } = require('./wallet-cassa'); // 🏛️ UNICO riferimento cassa Uranus
 
 // Soglie per rilascio crediti (PHARAON: 108/78, invariate)
 const SOGLIA_PRIMO_TURNO = 108;
@@ -99,7 +100,7 @@ async function distribuisciCrediti(numDoni) {
   const residui = Math.min(numDoni, creditiDisponibili) - daDareA51;
   if (residui > 0) {
     console.log(`   ♻️  5.1 vuoto: ${residui} crediti residui → ingresso DUAL ROG-URANUS a Sole (L0)`);
-    const cassaWallet   = process.env.CASSA_WALLET      || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
+    const cassaWallet   = URANUS_CASSA_WALLET;
     const rogUranusWallet = process.env.ROG_URANUS_WALLET || '0x0000000000000000000000000000000000000003';
 
     const creditiResidui = await pg.queryMany(

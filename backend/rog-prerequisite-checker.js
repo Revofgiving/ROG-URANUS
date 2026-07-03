@@ -35,10 +35,11 @@ function internalHeaders() {
 // ── Parametri verifica ON-CHAIN (doppia garanzia: donazione ROG Small ≥ 2 USDC alla cassa) ──
 // Wallet cassa ROG: destinatario delle donazioni ROG Small.
 const ROG_CASSA_WALLET = (process.env.CASSA_ROG_WALLET || process.env.ROG_WALLET_CASSA || process.env.ROG_WALLET_ADDRESS || '0xd5bcc7acc9d6862c784807134c1f70c3e7f9f790').toLowerCase();
-// USDC usato da ROG (contratto distribuito ROGTreasuryController.USDC_ADDRESS, constant immutabile)
-// = USDC.e bridged. DEVE coincidere col token ROG, altrimenti il check on-chain non vede le donazioni.
-// Override via env USDC_CONTRACT_ADDRESS.
-const USDC_CONTRACT = (process.env.USDC_CONTRACT_ADDRESS || '0x2791bca1f2de4661ed88a30c99a7a9449aa84174').toLowerCase();
+// Token USDC delle donazioni ROG recenti alla cassa ROG (gate URANUS da ROG_DONATION_SINCE).
+// VERIFICATO on-chain 02/07/2026: la cassa ROG 0xD5bCC7… detiene USDC NATIVO 0x3c49… (0 bridged).
+// Il vecchio ROGTreasuryController usava il bridged 0x2791…, ma le operazioni sono migrate al nativo
+// (script ROG USDC_OLD→USDC_NEW). Variabile DEDICATA, disaccoppiata da quella di URANUS.
+const USDC_CONTRACT = (process.env.ROG_USDC_CONTRACT_ADDRESS || '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359').toLowerCase();
 // Blocco Polygon di riferimento (8 giugno 2026). Impostare ROG_BLOCK_8_GIUGNO (hex) per efficienza/precisione;
 // default '0x0' = scansione completa (fallback robusto). Richiede un endpoint Alchemy in POLYGON_RPC_URL
 // (il metodo alchemy_getAssetTransfers è specifico di Alchemy).

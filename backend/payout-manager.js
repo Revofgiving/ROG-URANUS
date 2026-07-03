@@ -9,9 +9,9 @@
  * In assenza della chiave, logga un warning ma non blocca il flusso.
  */
 
-// USDC.e bridged — DEVE coincidere col token del contratto ROG distribuito (constant immutabile).
-// Override via env USDC_CONTRACT_ADDRESS.
-const USDC_CONTRACT  = process.env.USDC_CONTRACT_ADDRESS || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; // Polygon USDC.e
+// USDC NATIVO Polygon (0x3c49…) — token realmente detenuto/usato dalla Cassa URANUS 0x4f53…
+// (verificato on-chain 02/07/2026). Override via env USDC_CONTRACT_ADDRESS (deve restare il nativo).
+const USDC_CONTRACT  = process.env.USDC_CONTRACT_ADDRESS || '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // Polygon USDC nativo
 const USDC_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
   'function balanceOf(address) view returns (uint256)',

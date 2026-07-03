@@ -17,6 +17,7 @@ const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 const { ethers } = require('ethers');
 const pg = require('./pg-connection-manager');
+const { URANUS_CASSA_WALLET } = require('./wallet-cassa'); // 🏛️ UNICO riferimento cassa Uranus
 
 // ABI minima ERC-20: solo l'evento Transfer
 const ERC20_ABI = [
@@ -27,9 +28,9 @@ const ERC20_ABI = [
 // URANUS accetta donazioni in USDC e XAUt0 (Tether Gold) su Polygon
 const ACCEPTED_TOKENS = {
   USDC: {
-    // USDC.e bridged — DEVE coincidere col token del contratto ROG distribuito
-    // (ROGTreasuryController.USDC_ADDRESS, constant immutabile) e col token inviato dal frontend.
-    address: (process.env.USDC_CONTRACT_ADDRESS || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174').toLowerCase(),
+    // USDC NATIVO Polygon (0x3c49…) — token realmente ricevuto dalla Cassa URANUS 0x4f53…
+    // (verificato on-chain 02/07/2026) e inviato dal frontend. Override via env USDC_CONTRACT_ADDRESS.
+    address: (process.env.USDC_CONTRACT_ADDRESS || '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359').toLowerCase(),
     decimals: 6,
     symbol: 'USDC',
     minDonation: 20,  // 20 USDC minimo
@@ -80,9 +81,9 @@ function getProvider() {
  * @throws {Error} se la transazione non è valida
  */
 async function verificaDonazione({ txHash, walletMittente, importoMinimo = 20 }) {
-  const destinatario = process.env.URANO_FUND_WALLET;
+  const destinatario = URANUS_CASSA_WALLET; // cassa Uranus = destinatario on-chain delle donazioni
 
-  if (!destinatario) throw new Error('URANO_FUND_WALLET non configurato');
+  if (!destinatario) throw new Error('Cassa Uranus (URANUS_CASSA_WALLET) non configurata');
 
   // 0. Validazione formato input (prima di qualsiasi chiamata esterna)
   const TXHASH_REGEX = /^0x[a-fA-F0-9]{64}$/;

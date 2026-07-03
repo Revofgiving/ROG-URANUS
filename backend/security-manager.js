@@ -222,7 +222,6 @@ function requireAdminKey(req, res, next) {
 
 const REQUIRED_PROD_VARS = [
   'DATABASE_URL',
-  'URANO_FUND_WALLET',
   'POLYGON_RPC_URL',
   'USDC_CONTRACT_ADDRESS',
   'CORS_ORIGIN',
@@ -259,9 +258,13 @@ function validateEnvironment() {
     warnings.push('CORS_ORIGIN=* in produzione — impostare origini specifiche!');
   }
 
-  // Wallet fondo URANO deve essere un indirizzo valido
-  if (process.env.URANO_FUND_WALLET && !WALLET_REGEX.test(process.env.URANO_FUND_WALLET)) {
-    warnings.push('URANO_FUND_WALLET non è un indirizzo Ethereum valido');
+  // Cassa URANUS obbligatoria: accettata via URANUS_CASSA_WALLET (canonico) o URANO_FUND_WALLET (legacy).
+  const cassaUranus = process.env.URANUS_CASSA_WALLET || process.env.URANO_FUND_WALLET;
+  if (isProd && !cassaUranus) {
+    missing.push('URANUS_CASSA_WALLET (o URANO_FUND_WALLET)');
+  }
+  if (cassaUranus && !WALLET_REGEX.test(cassaUranus)) {
+    warnings.push('URANUS_CASSA_WALLET/URANO_FUND_WALLET non è un indirizzo Ethereum valido');
   }
 
   return { ok: missing.length === 0, missing, warnings };

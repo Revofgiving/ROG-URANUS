@@ -18,10 +18,11 @@ const tableManager = require('./table-manager');
 const asyncQ       = require('./async-queue');
 const cassaTransfer = require('./cassa-transfer-manager');
 const crossPlatform = require('./cross-platform-bridge');
+const { URANUS_CASSA_WALLET } = require('./wallet-cassa'); // 🏛️ UNICO riferimento cassa Uranus
 
-// USDC.e (token ROG distribuito) — usato per leggere il saldo reale della cassa
-// nell'invariante di solvibilità. Override via env USDC_CONTRACT_ADDRESS.
-const USDC_CONTRACT_CASSA = (process.env.USDC_CONTRACT_ADDRESS || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174');
+// USDC NATIVO Polygon (0x3c49…) — token realmente detenuto dalla Cassa URANUS 0x4f53…, usato per leggere
+// il saldo reale nell'invariante di solvibilità (verificato on-chain 02/07/2026). Override via env USDC_CONTRACT_ADDRESS.
+const USDC_CONTRACT_CASSA = (process.env.USDC_CONTRACT_ADDRESS || '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359');
 
 // ── COSTANTI FIFO ─────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ async function posizionaRientroSoleUnico(wallet, nome) {
 // (USDC) oppure null se non leggibile (RPC/wallet non configurati o errore).
 async function getSaldoCassaUsdc() {
   const rpcUrl = process.env.POLYGON_RPC_URL;
-  const cassa  = process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET;
+  const cassa  = URANUS_CASSA_WALLET;
   if (!rpcUrl || !cassa) return null;
   try {
     const { ethers } = require('ethers');
@@ -304,7 +305,7 @@ async function processaUscita() {
 
   // 8. [HUMAN] Distribuzione netto 1.000 (sessione 4): 800 tasca + 100 PHARAOH + 60 ROG + 40 Sole
   if (tipoAccount === 'HUMAN' && uscita.pharaohHuman) {
-    const cassaW = process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
+    const cassaW = URANUS_CASSA_WALLET;
 
     // PHARAOH SINGOLO (100 USDC) — ACCANTONATO in cassa URANUS (PHARAOH_PENDING),
     // esattamente come l'uscita L3: i 100 USDC NON vengono ricircolati a Sole; restano
@@ -345,7 +346,7 @@ async function processaUscita() {
 
   // 8b. [CASSA] L0 URANUS: 40 USDC → 4 posizioni Sole a nome CASSA-URANUS (allineato schema)
   if (tipoAccount === 'CASSA' && uscita.soleL0Uranus) {
-    const cassaW0 = process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
+    const cassaW0 = URANUS_CASSA_WALLET;
     await pg.queryOne(
       `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, uscita_numero, tipo_uscita)
        VALUES ('SOLE_L0_URANUS_NETTUNO_CASSA', $1, $2, $3, $4, 'CASSA') RETURNING *`,

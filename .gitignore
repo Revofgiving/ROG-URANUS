@@ -145,3 +145,10 @@ vite.config.ts.timestamp-*
 # macOS
 .DS_Store
 ._*
+
+# Cartella segreti — MAI committare
+cartella-no-deploy/
+
+# Documenti di handoff interni (non necessari per il deploy)
+HANDOFF-*.md
+REGISTRO-*.md

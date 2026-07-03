@@ -31,7 +31,7 @@
  * 11. Perpetuo non rilascia Gemello, solo Perpetuo successivo
  * 12. Solo Account Secondari passano da L3 a L4
  * 13. Funzioni uscita L4 (1.000 trattenuti per L5 + 100 per 10 crediti)
- * 14. Funzioni uscita L5 (1.100 trattenuti per 110 crediti)
+ * 14. Funzioni uscita L5 (100 trattenuti per 10 crediti — scelta URANUS: netto 2.900)
  */
 'use strict';
 

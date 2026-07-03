@@ -15,6 +15,7 @@
 
 const crypto = require('crypto');
 const pg = require('./pg-connection-manager');
+const { URANUS_CASSA_WALLET } = require('./wallet-cassa'); // 🏛️ UNICO riferimento cassa Uranus
 
 // ── COSTANTI ──────────────────────────────────────────────────────
 
@@ -22,7 +23,7 @@ const GIFT_EXPIRY_DAYS = 180;                  // 6 mesi per ritirare il dono
 const GIFT_CHECK_INTERVAL_MS = 60 * 60 * 1000; // Controlla scadenze ogni ora
 const READY_CHECK_INTERVAL_MS = 60 * 1000;     // Notifica "dono pronto" ogni 60s
 // Cassa URANUS: i doni non ritirati restano qui (i fondi non escono mai senza ACCETTA DONO).
-const CASSA_URANUS_WALLET = process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
+const CASSA_URANUS_WALLET = URANUS_CASSA_WALLET;
 
 // ── INIT DB ──────────────────────────────────────────────────────
 

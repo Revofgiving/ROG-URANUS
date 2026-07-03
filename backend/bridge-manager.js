@@ -30,6 +30,7 @@ const crossPlatform    = require('./cross-platform-bridge');
 const goldConverter    = require('./gold-converter');
 const giftManager      = require('./gift-manager');
 const cassaTransfer    = require('./cassa-transfer-manager');
+const { URANUS_CASSA_WALLET } = require('./wallet-cassa'); // 🏛️ UNICO riferimento cassa Uranus
 
 // ── RIENTRO A SOLE (L0) ─────────────────────────────────────────
 // Posiziona una singola posizione nella tavola attiva del livello Sole.
@@ -113,7 +114,7 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
 
   let nettoFinale = nettoOriginale;
   const deduzioni = [];
-  const cassaWallet = process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
+  const cassaWallet = URANUS_CASSA_WALLET;
   const isSecondario = tipoAccount === 'PERPETUO' || tipoAccount === 'GEMELLO';
 
   // 1. AUTO-ENTRY Nettuno + eventuale Sole L0 URANUS
@@ -206,7 +207,7 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
   // 4. DONO PENDENTE: solo per wallet NON di sistema.
   //    CASSA URANUS (0x4f53...): è già la treasury → il netto resta in cassa senza payout circolare.
   //    Fortunato e tutti gli altri wallet: normale ACCETTA DONO.
-  const isCassaWallet = wallet.toLowerCase() === (process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce').toLowerCase();
+  const isCassaWallet = wallet.toLowerCase() === URANUS_CASSA_WALLET;
   if (isCassaWallet) {
     console.log(`   🏦 CASSA URANUS: netto ${nettoFinale} USDC rimane accantonato in cassa (nessun payout circolare).`);
     await pg.queryOne(
@@ -253,7 +254,7 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
  *
  * @param {string} wallet - Wallet del Faraone uscente
  * @param {string} nome - Nome
- * @param {number} nettoOriginale - Netto L5 (1.900 USDC)
+ * @param {number} nettoOriginale - Netto L5 (2.900 USDC)
  * @param {number} numeroTurno - Numero turno uscita
  * @returns {Object} Dettaglio deduzioni e netto finale
  */
@@ -264,7 +265,7 @@ async function hookUscitaL5(wallet, nome, nettoOriginale, numeroTurno) {
 
   let nettoFinale = nettoOriginale;
   const deduzioni = [];
-  const cassaWallet = process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
+  const cassaWallet = URANUS_CASSA_WALLET;
 
   // ── ROG SMALL (50 ingressi dual = 100 posizioni) — 100 USDC ──────────
   nettoFinale -= BRIDGE.L5_DEDUZIONE_TOTALE;  // 400 = 100 (ROG SMALL) + 300 (a nome utente)
@@ -338,7 +339,7 @@ async function hookUscitaL5(wallet, nome, nettoOriginale, numeroTurno) {
 
   // Auto-entry Nettuno per il secondario uscente da L5: 5 ingressi DUAL
   // (5 CASSA + 5 HUMAN = 10 posizioni in coda = 100 USDC), come le altre gestioni.
-  const cassaFifoL5 = process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce';
+  const cassaFifoL5 = URANUS_CASSA_WALLET;
   for (let i = 0; i < BRIDGE.L5_NETTUNO_NUM / 2; i++) {
     await queue.aggiungiPosizione({ wallet: cassaFifoL5, nome: `CASSA (da L5) #${i+1}`, tipo: 'CASSA' });
     await queue.aggiungiPosizione({ wallet, nome: `${nome} (da L5) #${i+1}`, tipo: 'HUMAN' });
@@ -354,7 +355,7 @@ async function hookUscitaL5(wallet, nome, nettoOriginale, numeroTurno) {
   asyncQ.enqueue(() => queue.processaUsciteCascata(), 'cascata-fifo-l5');
 
   // DONO PENDENTE L5 — solo per wallet NON di sistema (stessa logica di L3).
-  const isCassaL5 = wallet.toLowerCase() === (process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce').toLowerCase();
+  const isCassaL5 = wallet.toLowerCase() === URANUS_CASSA_WALLET;
   if (isCassaL5) {
     console.log(`   🏦 CASSA URANUS L5: netto ${nettoFinale} USDC rimane accantonato in cassa.`);
     await pg.queryOne(

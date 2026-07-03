@@ -220,27 +220,7 @@ async function inviaDonazioneCross(targetPlatform, wallet, importo, numPosizioni
   });
 }
 
-/**
- * Richiedi lo stato KYC di un wallet a un'altra piattaforma.
- *
- * @param {string} targetPlatform - 'ROG' o 'PHARAOH'
- * @param {string} wallet - Wallet da verificare
- */
-async function richiediKycStatus(targetPlatform, wallet) {
-  const baseUrl = targetPlatform === 'ROG' ? ROG_BACKEND_URL
-               : targetPlatform === 'PHARAOH' ? PHARAOH_BACKEND_URL
-               : null;
-  if (!baseUrl) return { success: false, reason: 'URL non configurato' };
-
-  return new Promise((resolve) => {
-    const url = `${baseUrl}/api/cross/kyc-status`;
-    postToPlatform(baseUrl, '/api/cross/kyc-status', {
-      platform: PLATFORM_NAME,
-      wallet,
-      timestamp: new Date().toISOString(),
-    }).then(resolve);
-  });
-}
+// (RIMOSSO 02/07/2026) richiediKycStatus — lo zk-KYC è gestito solo in ROG: URANUS non lo richiede.
 
 /**
  * Notifica un'altra piattaforma di un evento generico.
@@ -274,8 +254,8 @@ function getStatus() {
     platformName: PLATFORM_NAME,
     protocolVersion: '1.0',
     supportedEndpoints: {
-      outgoing: ['POST /api/cross/dona', 'POST /api/cross/rog-small', 'POST /api/cross/notifica', 'POST /api/cross/kyc-status'],
-      incoming: ['POST /api/cross/dona', 'POST /api/cross/rog-small', 'POST /api/cross/ingresso', 'POST /api/cross/notifica', 'POST /api/cross/kyc-status'],
+      outgoing: ['POST /api/cross/dona', 'POST /api/cross/rog-small', 'POST /api/cross/notifica'],
+      incoming: ['POST /api/cross/dona', 'POST /api/cross/rog-small', 'POST /api/cross/ingresso', 'POST /api/cross/notifica'],
     },
   };
 }
@@ -287,7 +267,6 @@ module.exports = {
   registraIngressoPharaoh,
   // Outgoing calls (generici — bidirezionali)
   inviaDonazioneCross,
-  richiediKycStatus,
   notificaPiattaforma,
   // Middleware
   crossPlatformAuth,

@@ -553,21 +553,8 @@ app.post('/api/admin/dono/:id/correggi-wallet', async (req, res) => {
   } catch (e) { res.status(400).json({ success: false, error: e.message }); }
 });
 
-// ── KYC STATUS ──
-const kycBridge = require('./kyc-bridge');
-
-app.get('/api/kyc/status/:wallet', async (req, res) => {
-  const wallet = req.params.wallet?.toLowerCase();
-  if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet)) return res.status(400).json({ error: 'Wallet non valido' });
-  try {
-    const status = await kycBridge.getKycStatusForWallet(wallet);
-    res.json({ success: true, kyc: status });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/kyc/stats', (_, res) => {
-  res.json({ success: true, kycStats: kycBridge.getCacheStats() });
-});
+// ── KYC ── RIMOSSO (02/07/2026, legge committente): lo zk-KYC è gestito ESCLUSIVAMENTE in ROG.
+// In URANUS non è mai richiesto: endpoint informativi /api/kyc/status e /api/kyc/stats eliminati.
 
 // ── PREDISPOSIZIONI ──
 const predisposizione = require('./predisposizione-manager');
@@ -850,6 +837,7 @@ app.get('/api/cross-platform/stato', (_, res) => {
 
 // ── CROSS-PLATFORM INCOMING (ricevi richieste da ROG/PHARAOH) ──
 const crossPlatform = require('./cross-platform-bridge');
+const { URANUS_CASSA_WALLET } = require('./wallet-cassa'); // 🏛️ UNICO riferimento cassa Uranus
 
 /**
  * POST /api/cross/dona — Ricevi donazione/ingresso da ROG o PHARAOH
@@ -877,7 +865,7 @@ app.post('/api/cross/dona', crossPlatform.crossPlatformAuth, async (req, res) =>
     // Crea posizioni reali nel sistema URANUS (Sole L0)
     for (let i = 0; i < n; i++) {
       const rCassa = await flow.posizionaDonatoreEntrataCross(
-        process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce',
+        URANUS_CASSA_WALLET,
         `CASSA cross da ${from} #${i + 1}`
       );
       const rHuman = await flow.posizionaDonatoreEntrataCross(
@@ -920,7 +908,7 @@ app.post('/api/cross/rog-small', crossPlatform.crossPlatformAuth, async (req, re
 
     for (let i = 0; i < n; i++) {
       await flow.posizionaDonatoreEntrataCross(
-        process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce',
+        URANUS_CASSA_WALLET,
         `CASSA ROG_SMALL da ${from} #${i + 1}`
       );
       await flow.posizionaDonatoreEntrataCross(w, `ROG_SMALL da ${from} #${i + 1}`);
@@ -951,7 +939,7 @@ app.post('/api/cross/ingresso', crossPlatform.crossPlatformAuth, async (req, res
 
     for (let i = 0; i < n; i++) {
       await flow.posizionaDonatoreEntrataCross(
-        process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce',
+        URANUS_CASSA_WALLET,
         `CASSA ingresso da ${from} #${i + 1}`
       );
       await flow.posizionaDonatoreEntrataCross(w, `Ingresso da ${from} #${i + 1}`);
@@ -968,16 +956,9 @@ app.post('/api/cross/ingresso', crossPlatform.crossPlatformAuth, async (req, res
 });
 
 /**
- * POST /api/cross/kyc-status — Un'altra piattaforma chiede lo stato KYC di un wallet
+ * (RIMOSSO 02/07/2026) POST /api/cross/kyc-status — lo zk-KYC è gestito solo in ROG:
+ * URANUS non espone né richiede stato KYC ad altre piattaforme.
  */
-app.post('/api/cross/kyc-status', crossPlatform.crossPlatformAuth, async (req, res) => {
-  const { wallet } = req.body;
-  if (!wallet) return res.status(400).json({ error: 'wallet obbligatorio' });
-  try {
-    const status = await kycBridge.getKycStatusForWallet(wallet);
-    res.json({ success: true, wallet: wallet.toLowerCase(), verified: status.db?.status === 'VERIFIED', kyc: status });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
 
 /**
  * POST /api/cross/notifica — Notifica generica da un'altra piattaforma
@@ -1275,8 +1256,8 @@ app.post('/api/admin/invia-payout', async (req, res) => {
 
   const USDC_ABI = ['function transfer(address to, uint256 amount) returns (bool)',
                     'function balanceOf(address) view returns (uint256)'];
-  // USDC.e bridged — stesso token del contratto ROG distribuito e della cassa Uranus.
-  const USDC_ADDR = process.env.USDC_CONTRACT_ADDRESS || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+  // USDC NATIVO Polygon (0x3c49…) — token realmente usato dalla cassa Uranus 0x4f53… (verificato on-chain 02/07/2026).
+  const USDC_ADDR = process.env.USDC_CONTRACT_ADDRESS || '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359';
 
   let lastError = null;
 
@@ -1406,7 +1387,7 @@ app.post('/api/admin/recupera-rientro', async (req, res) => {
 // è già presente, per non violare il vincolo UNIQUE su accounts.wallet).
 async function migraCassaPlaceholder() {
   const OLD_CASSA = '0x0000000000000000000000000000000000000002';
-  const NEW_CASSA = (process.env.URANO_FUND_WALLET || process.env.CASSA_WALLET || '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce').toLowerCase();
+  const NEW_CASSA = URANUS_CASSA_WALLET;
   if (OLD_CASSA === NEW_CASSA) return { skipped: true, motivo: 'OLD == NEW' };
   return await pg.transaction(async () => {
     const counts = {};
