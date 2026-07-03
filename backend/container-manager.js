@@ -207,6 +207,124 @@ async function getStatoContenitori() {
     contenitore_53: { tipo: '5.3', descrizione: 'Crediti in standby (se 5.1 vuoto → ROG-URANUS + CASSA URANUS a Sole)', disponibili: crediti }
   };
 }
+// ========================================
+// CODA FIFO "POSIZIONE AL VOLO"
+// ========================================
+// Utenti che richiedono una posizione gratuita a Sole L0.
+// Alimentata ogni volta che il sistema crea posizioni "al volo" (es. L4 Giove).
+// Priorità FIFO (data iscrizione); fallback: Fortunato (posizione 0).
+
+async function initRichiesteVolo() {
+  const pg = require('./pg-connection-manager');
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS richieste_posizioni_volo (
+      id           SERIAL PRIMARY KEY,
+      wallet       TEXT NOT NULL,
+      nome         TEXT,
+      status       TEXT NOT NULL DEFAULT 'IN_REVISIONE',
+      note_staff   TEXT,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      assegnata_at TIMESTAMPTZ
+    )
+  `);
+  // Migrazione idempotente: aggiunge note_staff se manca (deploy successivi)
+  await pg.query(`ALTER TABLE richieste_posizioni_volo ADD COLUMN IF NOT EXISTS note_staff TEXT`);
+  await pg.query(`CREATE INDEX IF NOT EXISTS idx_richieste_volo_status ON richieste_posizioni_volo(status)`);
+  // Indice univoco: un wallet non può avere più richieste ATTIVE (IN_REVISIONE o IN_ATTESA) contemporaneamente
+  await pg.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_richieste_volo_wallet_attiva ON richieste_posizioni_volo(wallet) WHERE status IN ('IN_REVISIONE', 'IN_ATTESA')`);
+  console.log('🌟 [PosizioneAlVolo] Tabella richieste pronta');
+}
+
+/**
+ * Registra la richiesta di un utente per una posizione al volo.
+ * Inizia con status IN_REVISIONE (in attesa di approvazione dello staff).
+ * Un wallet non può avere più richieste attive (IN_REVISIONE o IN_ATTESA) contemporaneamente.
+ */
+async function registraRichiestaPosizioneVolo(wallet, nome) {
+  const pg = require('./pg-connection-manager');
+  const w = wallet.toLowerCase();
+  const esistente = await pg.queryOne(
+    `SELECT * FROM richieste_posizioni_volo WHERE wallet = $1 AND status IN ('IN_REVISIONE', 'IN_ATTESA')`, [w]
+  );
+  if (esistente) return { ...esistente, duplicate: true };
+  return pg.queryOne(
+    `INSERT INTO richieste_posizioni_volo (wallet, nome) VALUES ($1, $2) RETURNING *`,
+    [w, nome || `${w.substring(0, 10)}...`]
+  );
+}
+
+/**
+ * Approva una richiesta IN_REVISIONE → passa a IN_ATTESA (entra in coda FIFO).
+ */
+async function approvaRichiesta(id) {
+  const pg = require('./pg-connection-manager');
+  const row = await pg.queryOne(
+    `UPDATE richieste_posizioni_volo SET status = 'IN_ATTESA'
+     WHERE id = $1 AND status = 'IN_REVISIONE' RETURNING *`,
+    [id]
+  );
+  if (!row) throw new Error(`Richiesta #${id} non trovata o non in revisione`);
+  return row;
+}
+
+/**
+ * Rifiuta una richiesta IN_REVISIONE.
+ * @param {string} [note] - Motivazione del rifiuto (opzionale)
+ */
+async function rifiutaRichiesta(id, note) {
+  const pg = require('./pg-connection-manager');
+  const row = await pg.queryOne(
+    `UPDATE richieste_posizioni_volo SET status = 'RIFIUTATA', note_staff = $2
+     WHERE id = $1 AND status = 'IN_REVISIONE' RETURNING *`,
+    [id, note || null]
+  );
+  if (!row) throw new Error(`Richiesta #${id} non trovata o non in revisione`);
+  return row;
+}
+
+/** Ritorna tutte le richieste IN_REVISIONE (lista per lo staff). */
+async function getRichiesteInRevisione() {
+  const pg = require('./pg-connection-manager');
+  return pg.queryMany(
+    `SELECT * FROM richieste_posizioni_volo WHERE status = 'IN_REVISIONE' ORDER BY created_at ASC`
+  );
+}
+
+/**
+ * Preleva il prossimo utente dalla coda FIFO (più vecchio prima).
+ * Marca la richiesta come ASSEGNATA atomicamente (SKIP LOCKED = niente race condition).
+ * Ritorna null se la coda è vuota.
+ */
+async function prelevaProssimaRichiestaVolo() {
+  const pg = require('./pg-connection-manager');
+  return pg.queryOne(`
+    UPDATE richieste_posizioni_volo SET status = 'ASSEGNATA', assegnata_at = NOW()
+    WHERE id = (
+      SELECT id FROM richieste_posizioni_volo
+      WHERE status = 'IN_ATTESA'
+      ORDER BY created_at ASC, id ASC
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING *
+  `);
+}
+
+/** Numero di richieste IN_ATTESA. */
+async function contaRichiesteInAttesa() {
+  const pg = require('./pg-connection-manager');
+  const row = await pg.queryOne(`SELECT COUNT(*)::int AS cnt FROM richieste_posizioni_volo WHERE status = 'IN_ATTESA'`);
+  return Number(row?.cnt) || 0;
+}
+
+/** Stato dell'ultima richiesta di un wallet (qualunque status). */
+async function getStatoRichiestaVolo(wallet) {
+  const pg = require('./pg-connection-manager');
+  return pg.queryOne(
+    `SELECT * FROM richieste_posizioni_volo WHERE wallet = $1 ORDER BY created_at DESC LIMIT 1`,
+    [wallet.toLowerCase()]
+  );
+}
 
 // ========================================
 // CODA FIFO "POSIZIONE AL VOLO"
