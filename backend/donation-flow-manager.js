@@ -494,7 +494,35 @@ async function watchdogTurnoEntrata() {
   }
 }
 
-async function posizionaDonatoreEntrata(wallet, nome) {
+// 🔮 Riserve Gemelli nella numerazione Sole L0: 26, 40, 54 … = 26 + 14k
+// (spec v12 reg.10 / rules.regolaTicketGemello). Questi slot sono SALTATI dai donatori
+// e occupati in anticipo (occupazione anticipata delle caselle).
+function isPosizioneRiservataSole(p) { return p >= 26 && (p - 26) % 14 === 0; }
+
+async function posizionaDonatoreEntrata(wallet, nome, tipoPos = 'DONATORE') {
+  // 🔮 PREDESTINAZIONE Sole L0: prima di piazzare un DONATORE (CASSA/HUMAN),
+  // materializza le eventuali RISERVE (Gemelli 26+14k) che cadono sulla PROSSIMA casella,
+  // così i donatori "saltano" quegli slot esattamente come nella mappa cronologica certificata.
+  // La riserva occupa la casella ma è NON-sdoppiabile e NON gradua a Blocco 1
+  // (slot tenuto dal sistema finché il faraone gemello-releasing non lo reclama).
+  if (tipoPos === 'DONATORE') {
+    let guard = 0;
+    while (guard++ < 100) {
+      const tCur = await db.getTurnoCorrente('ENTRATA', 0);
+      if (!tCur) break;
+      const tavCur = await tableManager.getTavolaPercorsoAttiva(0, tCur.numero_turno);
+      if (!tavCur) break;
+      const occ = await db.countPosizioniInTavola(tavCur.id);
+      const pNext = (tCur.numero_turno - 1) * 6 + (occ + 1);
+      if (!isPosizioneRiservataSole(pNext)) break;
+      // Materializza lo slot come RISERVATA; verrà "reclamato" (→ GEMELLO) e accoppiato
+      // al Gemello giusto quando il faraone proprietario esce da Venere (gestisciUscitaFaraone).
+      console.log(`   🔒 Riserva RISERVATA → posizione Sole ${pNext} (ticket Gemello 26+14k)`);
+      await posizionaDonatoreEntrata(CASSA_WALLET, `RISERVA Gemello ticket ${pNext}`, 'RISERVATA');
+    }
+  }
+
+  const isRiserva = (tipoPos !== 'DONATORE');
   let turno = await db.getTurnoCorrente('ENTRATA', 0);
   if (!turno) {
     // Tentativo automatico di recupero prima di fallire
@@ -516,8 +544,9 @@ async function posizionaDonatoreEntrata(wallet, nome) {
 
   const r = await tableManager.posizionaDonatore({
     tavolaId: tavola.id, tavolaNumero: tavola.numero, livello: 0,
-    wallet, nome, tipo: 'DONATORE', donoImporto: rules.IMPORTI.DONO_ENTRATA,
-    turno: turno.numero_turno, sdoppiabile: true
+    wallet, nome, tipo: tipoPos, donoImporto: isRiserva ? 0 : rules.IMPORTI.DONO_ENTRATA,
+    turno: turno.numero_turno, sdoppiabile: !isRiserva,
+    numeroPosizioneBase: (turno.numero_turno - 1) * 6
   });
   await db.incrementSacerdotiEntrati(turno.id);
 
@@ -525,7 +554,7 @@ async function posizionaDonatoreEntrata(wallet, nome) {
   // ogni "numero" che entra ottiene SUBITO la sua scheda di predisposizione,
   // agganciata alla PROPRIA tavola di sdoppiamento Sole (chiave stabile fino alla
   // graduazione). Best-effort in savepoint: un errore qui non compromette il dono.
-  if (r.tavolaSdoppiamento?.numero) {
+  if (!isRiserva && r.tavolaSdoppiamento?.numero) {
     try {
       const pgConn = require('./pg-connection-manager');
       await pgConn.savepoint(() => predisposizione.prenotaIngressoSole(wallet, r.tavolaSdoppiamento.numero, turno.numero_turno));
@@ -587,6 +616,7 @@ async function posizionaDonatoreEntrata(wallet, nome) {
   return {
     tavolaNumero: tavola.numero, tavolaId: tavola.id,
     casella: r.casellaOccupata, turno: turno.numero_turno,
+    numeroPosizione: (turno.numero_turno - 1) * 6 + r.casellaOccupata,
     tavolaCompleta: r.tavolaCompleta, sdoppiamento: r.tavolaSdoppiamento?.numero ?? null
   };
 }
@@ -654,6 +684,22 @@ async function gestisciUscitaFaraone(turno) {
   const funzioni = await functionManager.rilasciaFunzioniL3({
     faraoneWallet, faraoneSigla: sigla, tipoAccount, turnoCorrente: turno.numero_turno
   });
+
+  // 🔗 ACCOPPIAMENTO Gemello ↔ slot Sole riservato (ticket 26+14k): il Gemello appena
+  // rilasciato "reclama" la sua posizione riservata, che diventa GEMELLO col wallet/sigla giusti.
+  // È l'accoppiamento forense: slot 26 → Gemello 1-A di Fortunato, 40 → 2° faraone, ecc.
+  if (funzioni?.gemello?.account?.ticketPrenotato) {
+    const g = funzioni.gemello.account;
+    try {
+      const pgConn = require('./pg-connection-manager');
+      await pgConn.query(
+        `UPDATE posizioni SET tipo = 'GEMELLO', wallet = $1, nome = $2
+         WHERE numero_posizione = $3 AND tipo IN ('RISERVATA','GEMELLO')`,
+        [String(g.wallet).toLowerCase(), g.sigla, g.ticketPrenotato]
+      );
+      console.log(`   🔗 Gemello ${g.sigla} accoppiato allo slot Sole riservato ${g.ticketPrenotato}`);
+    } catch (e) { console.error(`⚠️ accoppiamento Gemello slot ${g.ticketPrenotato}: ${e.message}`); }
+  }
 
   // Alert
   try { const alerts = require('./alert-manager'); alerts.alertPayout(faraoneWallet, uscita.netto, turno.numero_turno); } catch (_) {}

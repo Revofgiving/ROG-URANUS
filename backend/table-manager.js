@@ -124,7 +124,7 @@ async function creaTavolaSdoppiamento(livello, donatoreWallet, turno) {
  * @param {boolean} params.sdoppiabile - Se true crea tavola sdoppiamento (reg.7: simbionti = false)
  * @returns {Object} { posizione, tavolaSdoppiamento }
  */
-async function posizionaDonatore({ tavolaId, tavolaNumero, livello, wallet, nome, tipo, donoImporto, turno, sdoppiabile = true }) {
+async function posizionaDonatore({ tavolaId, tavolaNumero, livello, wallet, nome, tipo, donoImporto, turno, sdoppiabile = true, numeroPosizioneBase = null }) {
 const config = getLivelloConfig(livello);
 
 // Retry automatico su duplicate key (race condition casella)
@@ -148,7 +148,9 @@ for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       wallet,
       nome,
       tipo,
-      donoImporto
+      donoImporto,
+      // numero_posizione Sole L0 = (turno-1)*6 + casella; passato come base dal chiamante.
+      numeroPosizione: (numeroPosizioneBase != null) ? numeroPosizioneBase + casella : null
     });
     break;
   } catch (err) {

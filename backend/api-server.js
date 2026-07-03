@@ -643,9 +643,9 @@ app.get('/api/posizione/:wallet', async (req, res) => {
     const posizioni = await pg.queryMany(
       `SELECT p.id, p.tavola_id, p.casella, p.tipo, p.dono_importo,
               t.numero AS tavola_numero, t.livello, t.status AS tavola_status,
-              CASE WHEN t.livello = 0 AND t.tipo = 'PERCORSO'
-                   THEN (t.turno - 1) * 6 + p.casella
-                   ELSE NULL END AS numero_posizione
+              COALESCE(p.numero_posizione,
+                CASE WHEN t.livello = 0 AND t.tipo = 'PERCORSO'
+                     THEN (t.turno - 1) * 6 + p.casella ELSE NULL END) AS numero_posizione
        FROM posizioni p
        JOIN tavole t ON t.id = p.tavola_id
        WHERE p.wallet = $1
@@ -663,7 +663,20 @@ app.get('/api/posizione/:wallet', async (req, res) => {
       'SELECT * FROM coda_fifo WHERE wallet = $1 AND is_rientro = true ORDER BY posizione ASC', [wallet]
     );
 
-    res.json({ success: true, account, posizioni, uscite, rientri });
+    // Posizioni SECONDARIE dell'utente: SOLO Gemello + Perpetuo generati da questo wallet.
+    // Etichetta utente unica e generica: "posizioni secondarie" (nessun termine tecnico che confonde).
+    const posizioniSecondarie = await pg.queryMany(
+      `SELECT p.id, p.numero_posizione, p.casella, t.numero AS tavola_numero,
+              t.livello, t.status AS tavola_status
+       FROM accounts a
+       JOIN posizioni p ON p.wallet = a.wallet
+       JOIN tavole t ON t.id = p.tavola_id
+       WHERE a.parent_wallet = $1 AND a.tipo IN ('GEMELLO','PERPETUO')
+       ORDER BY t.livello ASC, p.numero_posizione ASC NULLS LAST, p.casella ASC`,
+      [wallet]
+    );
+
+    res.json({ success: true, account, posizioni, posizioniSecondarie, uscite, rientri });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

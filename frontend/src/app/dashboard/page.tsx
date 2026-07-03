@@ -154,7 +154,14 @@ export default function DashboardPage() {
   const prossimaStazione = ORBITE_BASE.find((o) => o.livello === livelloMassimo + 1);
   const posizioniAttive = (posData?.posizioni ?? []).map((p) => ({
     id: p.id,
-    numero: `#${p.tavola_numero}`,
+    numero: p.numero_posizione != null ? `#${p.numero_posizione}` : `#${p.tavola_numero}`,
+    luogo: livelloToOrbita(p.livello).nome,
+    simbolo: livelloToOrbita(p.livello).simbolo,
+  }));
+  // Posizioni SECONDARIE (Gemello/Perpetuo dell'utente): etichetta generica, niente termini tecnici.
+  const posizioniSecondarie = (posData?.posizioniSecondarie ?? []).map((p) => ({
+    id: p.id,
+    numero: p.numero_posizione != null ? `#${p.numero_posizione}` : `#${p.tavola_numero}`,
     luogo: livelloToOrbita(p.livello).nome,
     simbolo: livelloToOrbita(p.livello).simbolo,
   }));
@@ -401,6 +408,37 @@ export default function DashboardPage() {
               </div>
             </div>
           </div>
+
+          {/* ✨ POSIZIONI SECONDARIE (Gemello/Perpetuo) — etichetta generica per non confondere */}
+          {posizioniSecondarie.length > 0 && (
+            <div
+              className="flex w-full justify-center"
+              style={{ marginTop: `${spacing.positionsTop}px`, transform: `translate(${responsiveOffsets.positionsX}px, ${responsiveOffsets.positionsY}px)` }}
+            >
+              <div className="w-full max-w-5xl overflow-hidden rounded-2xl border border-uranus-cyan/12 bg-[#07152b]/45 backdrop-blur-md">
+                <div className="border-b border-uranus-cyan/10 py-5 text-center">
+                  <p className="text-xl font-bold uppercase tracking-[4px] text-white">POSIZIONI SECONDARIE</p>
+                  <p className="mt-1 text-[10px] font-bold uppercase tracking-[3px] text-white/35">
+                    ATTIVE · {posizioniSecondarie.length}
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 p-5 md:grid-cols-2 xl:grid-cols-4" style={{ gap: `${spacing.positionCardsGap}px` }}>
+                  {posizioniSecondarie.map((posizione) => (
+                    <div
+                      key={`sec-${posizione.id}`}
+                      className="rounded-xl border border-uranus-cyan/15 bg-[#041129]/55 px-6 py-5 text-center"
+                    >
+                      <p className="text-4xl font-bold text-uranus-cyan">{posizione.numero}</p>
+                      <p className="mt-2 text-[10px] font-bold uppercase tracking-[2px] text-white/40">POSIZIONE SECONDARIA</p>
+                      <p className="mt-1 text-sm font-bold uppercase tracking-[3px] text-white/80">
+                        {posizione.simbolo} {posizione.luogo}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* 🔭 PANNELLO PREVISIONE PERCORSO */}
           <div

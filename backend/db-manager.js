@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS posizioni (
   tipo                   TEXT NOT NULL,               -- DONATORE | EREDE | FARAONE | SIMBIONTE | PERPETUO | GEMELLO | PROGREDITO
   dono_importo           NUMERIC(12,2) DEFAULT 0,
   sdoppiamento_tavola_id INTEGER,
+  numero_posizione       INTEGER,                      -- numerazione Sole L0 globale (0..N), riserve 26+14k incluse
   status                 TEXT NOT NULL DEFAULT 'ATTIVO',
   created_at             TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(tavola_id, casella)
@@ -391,6 +392,13 @@ console.log('🌀 Inizializzazione database SUPERURANO...');
 
   console.log('✅ Migrazione kyc_verifications.source verificata');
 
+  // Migrazione numero_posizione: numerazione Sole L0 globale (0..N) con riserve Gemelli 26+14k.
+  // Popolata dall'allocatore Sole in donation-flow-manager. UNIQUE parziale (solo dove valorizzata).
+  await pg.query(`ALTER TABLE posizioni ADD COLUMN IF NOT EXISTS numero_posizione INTEGER`);
+  await pg.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_posizioni_numero_posizione
+                  ON posizioni(numero_posizione) WHERE numero_posizione IS NOT NULL`);
+  console.log('✅ Migrazione posizioni.numero_posizione verificata');
+
   // Migrazione predisposizioni: da chiave per-wallet a PER-INGRESSO (wallet + tavola_sdoppiamento)
   // cos\u00ec ogni posizione del wallet ha un proprio percorso futuro (come ROG small/medium/large).
   try {
@@ -503,12 +511,12 @@ async function countPosizioniInTavola(tavolaId) {
 // POSIZIONI
 // ========================================
 
-async function createPosizione({ tavolaId, casella, wallet, nome, tipo, donoImporto = 0 }) {
+async function createPosizione({ tavolaId, casella, wallet, nome, tipo, donoImporto = 0, numeroPosizione = null }) {
   await initDatabase();
   return await pg.queryOne(
-    `INSERT INTO posizioni (tavola_id, casella, wallet, nome, tipo, dono_importo)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [tavolaId, casella, wallet.toLowerCase(), nome, tipo, donoImporto]
+    `INSERT INTO posizioni (tavola_id, casella, wallet, nome, tipo, dono_importo, numero_posizione)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+    [tavolaId, casella, wallet.toLowerCase(), nome, tipo, donoImporto, numeroPosizione]
   );
 }
 

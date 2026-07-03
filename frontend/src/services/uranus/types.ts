@@ -55,6 +55,16 @@ export interface PosizioneResponse {
     tavola_numero: number;
     livello: number;
     tavola_status: string;
+    numero_posizione: number | null;
+  }>;
+  // Posizioni secondarie dell'utente (Gemello/Perpetuo), mostrate genericamente in area personale.
+  posizioniSecondarie?: Array<{
+    id: number;
+    numero_posizione: number | null;
+    casella: number;
+    tavola_numero: number;
+    livello: number;
+    tavola_status: string;
   }>;
   uscite: Array<Record<string, unknown>>;
   rientri: Array<Record<string, unknown>>;
