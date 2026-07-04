@@ -165,7 +165,7 @@ function scheduleRetry() {
 async function registerDonation(wallet, amountUsdc, txHash) {
   return fireAndForget(`Donation ${wallet.substring(0, 10)} ${amountUsdc} USDC`, () =>
     contract.registerDonation(wallet, usdcToWei(amountUsdc), txHashToBytes32(txHash), {
-      gasLimit: 100000,
+      gasLimit: 400000, // registerDonation scrive struct+stringhe: 100k andava out-of-gas
       maxPriorityFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
       maxFeePerGas: ethers.utils.parseUnits('300', 'gwei'),
     })
@@ -189,7 +189,7 @@ async function registerPayout(wallet, amountUsdc, level, txHash) {
         level,
         txHashToBytes32(txHash),
         {
-          gasLimit: 100000,
+          gasLimit: 400000, // registerPayout scrive struct+stringhe: 100k andava out-of-gas
           maxPriorityFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
           maxFeePerGas: ethers.utils.parseUnits('300', 'gwei'),
         }
@@ -206,7 +206,11 @@ async function registerPayout(wallet, amountUsdc, level, txHash) {
  */
 async function registerBridgeEvent(wallet, txType, amountUsdc, targetPlatform) {
   return fireAndForget(`Bridge ${txType} → ${targetPlatform} ${amountUsdc} USDC`, () =>
-    contract.registerBridgeEvent(wallet, txType, usdcToWei(amountUsdc), targetPlatform)
+    contract.registerBridgeEvent(wallet, txType, usdcToWei(amountUsdc), targetPlatform, {
+      gasLimit: 400000, // gasLimit esplicito: evita out-of-gas e la stima gas rifiutata da alcuni RPC
+      maxPriorityFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
+      maxFeePerGas: ethers.utils.parseUnits('300', 'gwei'),
+    })
   );
 }
 
@@ -218,7 +222,11 @@ async function registerBridgeEvent(wallet, txType, amountUsdc, targetPlatform) {
  */
 async function registerCrossReference(localTxId, remotePlatform, remoteTxHash) {
   return fireAndForget(`CrossRef ${localTxId} ↔ ${remotePlatform}`, () =>
-    contract.registerCrossReference(localTxId, remotePlatform, txHashToBytes32(remoteTxHash))
+    contract.registerCrossReference(localTxId, remotePlatform, txHashToBytes32(remoteTxHash), {
+      gasLimit: 400000,
+      maxPriorityFeePerGas: ethers.utils.parseUnits('100', 'gwei'),
+      maxFeePerGas: ethers.utils.parseUnits('300', 'gwei'),
+    })
   );
 }
 
