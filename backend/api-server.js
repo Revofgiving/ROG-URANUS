@@ -42,9 +42,37 @@ const queue            = require('./queue-manager');
 const goldConverter    = require('./gold-converter');
 
 const securityHardener = require('./security-hardener');
+const securityAuditor  = require('./security-auditor');
+const rateLimit        = require('express-rate-limit');
 
 const app  = express();
 const PORT = process.env.PORT || 4000;
+
+// Dietro il reverse proxy di Coolify: fidati del primo hop per vedere l'IP reale
+// (necessario per rate-limit e log corretti). Tunabile via env TRUST_PROXY (numero di hop).
+app.set('trust proxy', Number(process.env.TRUST_PROXY) || 1);
+
+// RETE ANTI-CRASH: un errore non gestito NON deve abbattere il server in silenzio.
+process.on('unhandledRejection', (reason) => {
+  const msg = (reason && reason.message) ? reason.message : String(reason);
+  console.error('\ud83d\udedf [unhandledRejection]', msg);
+  try { require('./alert-manager').sendAlert('CRITICAL', 'UNHANDLED_REJECTION', String(msg).slice(0, 300)); } catch (_) {}
+});
+process.on('uncaughtException', (err) => {
+  console.error('\ud83d\udedf [uncaughtException]', err && err.stack ? err.stack : err);
+  try { require('./alert-manager').sendAlert('CRITICAL', 'UNCAUGHT_EXCEPTION', String(err && err.message ? err.message : err).slice(0, 300)); } catch (_) {}
+  // Uscita pulita: Coolify riavvia il processo in stato sano (meglio che restare corrotti).
+  setTimeout(() => process.exit(1), 1000);
+});
+
+// Rate limiter stretto per i payout admin (anti-abuso su operazioni che muovono denaro).
+const payoutAdminLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: Number(process.env.PAYOUT_ADMIN_MAX) || 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Troppi tentativi di payout. Riprova tra qualche minuto.' },
+});
 
 // 🛡️ SECURITY HEADERS — prime di tutto (massima priorità)
 app.use((req, res, next) => {
@@ -111,7 +139,7 @@ if (process.env.NODE_ENV === 'production') {
 
 // Kill switch middleware
 app.use(async (req, res, next) => {
-  if (req.path.startsWith('/api/admin') || req.path === '/api/health') return next();
+  if (req.path.startsWith('/api/admin') || req.path === '/api/health' || req.path === '/api/telegram/webhook') return next();
   try {
     if (await db.isSistemaBlocato()) {
       const stato = await db.getStatoBlocco();
@@ -505,6 +533,38 @@ app.post('/api/dono/accetta/:id', async (req, res) => {
     const result = await giftManager.accettaDono(Number(req.params.id), wallet);
     res.json(result);
   } catch (e) { res.status(400).json({ success: false, error: e.message }); }
+});
+
+// -- Telegram webhook (mod 4A): approvazione/rifiuto doni da parte di Isa --
+// Protetto da secret token (TELEGRAM_WEBHOOK_SECRET) + verifica che il mittente sia la chat di Isa.
+app.post('/api/telegram/webhook', async (req, res) => {
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  if (secret && req.headers['x-telegram-bot-api-secret-token'] !== secret) {
+    return res.status(401).json({ ok: false });
+  }
+  res.status(200).json({ ok: true }); // rispondi subito a Telegram (evita retry)
+  try {
+    const cq = req.body && req.body.callback_query;
+    if (!cq || !cq.data) return;
+    const alertMgr = require('./alert-manager');
+    const fromId  = String((cq.from && cq.from.id) || '');
+    const allowed = String(process.env.TELEGRAM_CHAT_ID || '');
+    if (allowed && fromId !== allowed) { try { alertMgr.answerCallbackQuery(cq.id, 'Non autorizzato'); } catch (_) {} return; }
+    const m = /^(approve|reject)_gift:(\d+)$/.exec(cq.data);
+    if (!m) { try { alertMgr.answerCallbackQuery(cq.id); } catch (_) {} return; }
+    const azione = m[1]; const donoId = Number(m[2]);
+    if (azione === 'approve') {
+      const r = await giftManager.approvaDono(donoId);
+      if (r.success) alertMgr.answerCallbackQuery(cq.id, `Dono #${donoId} inviato`);
+      else if (r.alreadyHandled) alertMgr.answerCallbackQuery(cq.id, `Dono #${donoId} gia gestito (${r.status})`);
+      else alertMgr.answerCallbackQuery(cq.id, `Invio non riuscito: ${String(r.error || '').slice(0, 150)}`);
+    } else {
+      const r = await giftManager.rifiutaDono(donoId);
+      alertMgr.answerCallbackQuery(cq.id, r.success ? `Dono #${donoId} sospeso` : `Dono #${donoId}: ${r.status || 'n/d'}`);
+    }
+  } catch (e) {
+    console.error('[TelegramWebhook] errore:', e.message);
+  }
 });
 
 // Storico doni
@@ -1253,10 +1313,16 @@ app.get('/api/admin/signer-address', (req, res) => {
 });
 
 // ── ADMIN: Invia payout USDC on-chain dalla tesoreria ──
-app.post('/api/admin/invia-payout', async (req, res) => {
+app.post('/api/admin/invia-payout', payoutAdminLimiter, async (req, res) => {
   if (!checkAdmin(req, res)) return;
   const { destinatario, importoUsdc, motivo, nonce: nonceOverride } = req.body;
   if (!destinatario || !importoUsdc) return res.status(400).json({ error: 'destinatario e importoUsdc obbligatori' });
+  // Stessa guardia di payout-manager: formato valido + non in denylist (chiude il bypass admin).
+  try {
+    if (!require('./payout-manager').isDestinatarioConsentito(destinatario)) {
+      return res.status(400).json({ error: 'Destinatario non consentito (formato non valido o in denylist)' });
+    }
+  } catch (_) {}
   if (!process.env.TREASURY_PRIVATE_KEY) return res.status(500).json({ error: 'TREASURY_PRIVATE_KEY non configurata su Coolify' });
 
   // RPC con fallback: se Alchemy blocca usiamo endpoint pubblici Polygon
@@ -1304,6 +1370,7 @@ app.post('/api/admin/invia-payout', async (req, res) => {
       const receipt = await tx.wait();
 
       console.log(`✅ [PAYOUT] Confermata: ${receipt.transactionHash}`);
+      try { require('./alert-manager').alertUscitaCassa({ destinatario, importoUsdc, motivo: motivo || 'payout admin', txHash: receipt.transactionHash }); } catch (_) {}
       return res.json({
         success: true, txHash: receipt.transactionHash,
         destinatario, importoUsdc, rpcUsato: rpcUrl,
@@ -1480,6 +1547,8 @@ app.listen(PORT, async () => {
     } catch (e) { console.error('⚠️ [WATCHDOG] Errore:', e.message); }
   }, 60_000);
   console.log('🔧 Watchdog turno entrata attivo (auto-recovery ogni 60s)');
+  // Audit di sicurezza automatico (ogni 24h) + digest Telegram a Isa
+  try { securityAuditor.start(); } catch (e) { console.error('[SecurityAuditor] avvio fallito:', e.message); }
 });
 
 module.exports = app;

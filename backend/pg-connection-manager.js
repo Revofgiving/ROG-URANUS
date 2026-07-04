@@ -22,10 +22,11 @@ function getPool() {
   if (!pool) {
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      max: 80,                      // 80 connessioni (era 20) — alto traffico stasera
+      max: Number(process.env.PG_POOL_MAX) || 80,  // connessioni pool — tunabile via env senza toccare il codice
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000, // 10s timeout connessione (era 5s)
+      connectionTimeoutMillis: 10000, // 10s timeout connessione
       statement_timeout: 30000,      // 30s timeout query
+      keepAlive: true,               // mantiene vive le connessioni (evita drop dietro proxy/NAT)
     });
 
     pool.on('error', (err) => {

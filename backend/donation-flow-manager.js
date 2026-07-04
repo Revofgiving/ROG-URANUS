@@ -701,8 +701,12 @@ async function gestisciUscitaFaraone(turno) {
     } catch (e) { console.error(`⚠️ accoppiamento Gemello slot ${g.ticketPrenotato}: ${e.message}`); }
   }
 
-  // Alert
-  try { const alerts = require('./alert-manager'); alerts.alertPayout(faraoneWallet, uscita.netto, turno.numero_turno); } catch (_) {}
+  // Alert (uscita L3): mostra netto utente + quota trattenuta in cassa (battito "sistema vivo").
+  try {
+    const alerts = require('./alert-manager');
+    alerts.sendAlert('PAYOUT', 'USCITA_L3',
+      `Netto utente: ${uscita.netto} USDC\nQuota cassa: ${uscita.trattenutaCassa || 0} USDC\nTurno: ${turno.numero_turno}\nWallet: ${String(faraoneWallet).slice(0, 10)}...`);
+  } catch (_) {}
 
   await db.registraAvanzamento({
     wallet: faraoneWallet, tipoAccount,

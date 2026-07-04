@@ -173,6 +173,55 @@ async function creaDonoPendente(wallet, importo, livello, tipoUscita, dettagli =
 // ACCETTAZIONE DONO
 // ════════════════════════════════════════════════════════════════════
 
+// Finestra di approvazione Isa (mod 4A): attiva finche now < GIFT_APPROVAL_UNTIL (ISO).
+// Se la env non e impostata o non e una data valida -> gate DISATTIVO (flusso normale).
+function isApprovalWindowActive() {
+  const until = process.env.GIFT_APPROVAL_UNTIL;
+  if (!until) return false;
+  const t = Date.parse(until);
+  if (isNaN(t)) return false;
+  return Date.now() < t;
+}
+
+// Esegue il pagamento reale di un dono gia in stato PROCESSING e lo finalizza (ACCEPTED,
+// bookkeeping, registro on-chain, messaggio). NON gestisce il revert su fallimento: e
+// responsabilita del chiamante. Usato da approvaDono (mod 4A).
+async function _eseguiPayoutDono(dono) {
+  const w = String(dono.wallet).toLowerCase();
+  const donoId = dono.id;
+  let payout;
+  try {
+    const payoutMgr = require('./payout-manager');
+    payout = await payoutMgr.inviaPagamento(w, Number(dono.importo), `${dono.tipo_uscita} dono #${donoId}`);
+  } catch (e) {
+    payout = { success: false, error: e.message };
+  }
+  if (!payout.success) return { success: false, error: payout.error };
+  const txHash = payout.txHash;
+  await pg.query(
+    `UPDATE doni_pendenti SET status = 'ACCEPTED', accepted_at = NOW(), tx_hash = $1 WHERE id = $2`,
+    [txHash, donoId]
+  );
+  await pg.queryOne(
+    `INSERT INTO donazioni (donor_wallet, importo, tx_hash, tipo, destinatario_wallet, livello, turno, status)
+     VALUES ('SISTEMA', $1, $2, $3, $4, $5, NULL, 'COMPLETATA') RETURNING *`,
+    [dono.importo, txHash, dono.tipo_uscita, w, dono.livello]
+  );
+  try {
+    const chainRegistrar = require('./chain-registrar');
+    chainRegistrar.registerPayout(w, Number(dono.importo), dono.livello, txHash);
+  } catch (_) {}
+  const livelloNomi = { 3: 'Venere', 5: 'Saturno', 6: 'Nettuno', 4: 'Giove' };
+  await inviaMessaggio(w, {
+    subject: `✅ Dono accettato!`,
+    content: `Hai ricevuto il dono di ${dono.importo} USDC da ${livelloNomi[dono.livello] || 'Sistema'}. Distribuito al tuo wallet (tx: ${txHash}).`,
+    type: 'gift_accepted',
+    giftId: donoId,
+  });
+  console.log(`✅ [GiftManager] Dono #${donoId} pagato: ${dono.importo} USDC -> ${w.substring(0, 10)} (tx ${txHash})`);
+  return { success: true, donoId, importo: Number(dono.importo), wallet: w, txHash };
+}
+
 /**
  * L'utente accetta un dono pendente. Il payout viene eseguito.
  *
@@ -198,6 +247,24 @@ async function accettaDono(donoId, wallet) {
       throw new Error('Dono scaduto — i 180 giorni sono trascorsi');
     }
     throw new Error('Dono non trovato, già accettato o in elaborazione');
+  }
+
+  // 🔐 GATE APPROVAZIONE ISA (mod 4A): durante la finestra (GIFT_APPROVAL_UNTIL) il dono
+  // NON parte subito: va in ATTESA_APPROVAZIONE e viene inviato solo col "si" di Isa su
+  // Telegram. Non blocca nient'altro: riguarda solo questo dono.
+  if (isApprovalWindowActive()) {
+    await pg.query(`UPDATE doni_pendenti SET status = 'ATTESA_APPROVAZIONE' WHERE id = $1 AND status = 'PROCESSING'`, [donoId]);
+    try {
+      require('./alert-manager').inviaApprovazioneDono({ donoId, wallet: w, importo: Number(dono.importo), tipoUscita: dono.tipo_uscita });
+    } catch (_) {}
+    await inviaMessaggio(w, {
+      subject: `⏳ Dono in verifica`,
+      content: `Il tuo dono di ${dono.importo} USDC e in fase di verifica di sicurezza e verra inviato a breve, dopo l'approvazione. Non serve fare altro.`,
+      type: 'gift_pending_approval',
+      giftId: donoId,
+    });
+    console.log(`🟡 [GiftManager] Dono #${donoId} in ATTESA_APPROVAZIONE - ${w.substring(0, 10)}`);
+    return { success: true, donoId, pendingApproval: true, message: 'In attesa di approvazione di sicurezza (Isa)' };
   }
 
   // 💸 PAYOUT REALE on-chain dalla cassa URANUS. Il bottone "ACCETTA DONO" distribuisce
@@ -251,6 +318,46 @@ async function accettaDono(donoId, wallet) {
 // ════════════════════════════════════════════════════════════════════
 // NOTIFICA "DONO PRONTO" (quando i fondi sono in cassa)
 // ════════════════════════════════════════════════════════════════════
+
+// ── APPROVAZIONE / RIFIUTO DONO (mod 4A, via Telegram) ──
+// Isa approva l'invio: claim ATOMICO ATTESA_APPROVAZIONE->PROCESSING, poi payout reale.
+async function approvaDono(donoId) {
+  const dono = await pg.queryOne(
+    `UPDATE doni_pendenti SET status = 'PROCESSING' WHERE id = $1 AND status = 'ATTESA_APPROVAZIONE' RETURNING *`,
+    [donoId]
+  );
+  if (!dono) {
+    const row = await pg.queryOne(`SELECT status FROM doni_pendenti WHERE id = $1`, [donoId]);
+    return { success: false, alreadyHandled: true, status: row ? row.status : 'NOT_FOUND' };
+  }
+  const res = await _eseguiPayoutDono(dono);
+  if (!res.success) {
+    await pg.query(`UPDATE doni_pendenti SET status = 'ATTESA_APPROVAZIONE' WHERE id = $1 AND status = 'PROCESSING'`, [donoId]);
+    return { success: false, error: res.error };
+  }
+  return res;
+}
+
+// Isa rifiuta/sospende: il dono torna PENDING (potra essere riproposto in seguito).
+async function rifiutaDono(donoId) {
+  const dono = await pg.queryOne(
+    `UPDATE doni_pendenti SET status = 'PENDING' WHERE id = $1 AND status = 'ATTESA_APPROVAZIONE' RETURNING *`,
+    [donoId]
+  );
+  if (!dono) {
+    const row = await pg.queryOne(`SELECT status FROM doni_pendenti WHERE id = $1`, [donoId]);
+    return { success: false, alreadyHandled: true, status: row ? row.status : 'NOT_FOUND' };
+  }
+  try {
+    await inviaMessaggio(dono.wallet, {
+      subject: `Dono in sospeso`,
+      content: `Il tuo dono di ${dono.importo} USDC e temporaneamente in sospeso per una verifica. Potrai riprovare piu tardi.`,
+      type: 'gift_hold',
+      giftId: donoId,
+    });
+  } catch (_) {}
+  return { success: true, donoId, status: 'PENDING' };
+}
 
 /**
  * Invia UNA sola volta il messaggio "dono pronto per te!" per ogni dono PENDING
@@ -486,6 +593,9 @@ initGiftTables().then(() => avviaControlloScadenze()).catch(e => console.error('
 module.exports = {
   creaDonoPendente,
   accettaDono,
+  approvaDono,
+  rifiutaDono,
+  isApprovalWindowActive,
   notificaDoniPronti,
   processaScadenze,
   getDoniPendenti,

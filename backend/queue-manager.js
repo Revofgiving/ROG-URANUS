@@ -373,7 +373,7 @@ async function processaUscita() {
     } catch (e) { console.error(`   ⚠️  [CassaTransfer] Nettuno ROG: ${e.message}`); }
   }
 
-  try { const a = require('./alert-manager'); a.sendAlert('INFO', 'USCITA_FIFO', `FIFO #${numeroUscita}: ${tipoAccount} — ${uscita.nettoPersona} USDC`); } catch (_) {}
+  try { const a = require('./alert-manager'); a.sendAlert('INFO', 'USCITA_FIFO', `FIFO #${numeroUscita}: ${tipoAccount}\nNetto utente: ${uscita.nettoPersona} USDC\nQuota cassa: ${uscita.accantonamentoCassa || 0} USDC`); } catch (_) {}
 
   // 🎁 Dono pendente Nettuno (solo HUMAN: comporta un payout reale di nettoPersona).
   // L'utente lo ritira via ACCETTA DONO (gate fondi in cassa). CASSA = accantonamento, niente dono.

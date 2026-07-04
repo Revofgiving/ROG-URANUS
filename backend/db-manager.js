@@ -747,6 +747,14 @@ async function registraAvanzamento({ wallet, tipoAccount, daLivello, aLivello, d
 // KILL SWITCH
 // ========================================
 
+// Cache in-memory dello stato blocco: il middleware kill-switch gira su OGNI richiesta;
+// senza cache sarebbe 1 query DB per richiesta. TTL breve (staleness max = KILL_SWITCH_CACHE_MS).
+const KILL_SWITCH_CACHE_MS = Number(process.env.KILL_SWITCH_CACHE_MS) || 3000;
+let _bloccoCache = { value: null, exp: 0 };
+function _setBloccoCache(bloccato) {
+  _bloccoCache = { value: bloccato === true, exp: Date.now() + KILL_SWITCH_CACHE_MS };
+}
+
 async function bloccaSistema(motivo = 'Blocco di emergenza') {
   await initDatabase();
   await pg.query(
@@ -754,6 +762,7 @@ async function bloccaSistema(motivo = 'Blocco di emergenza') {
      ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
     [JSON.stringify({ bloccato: true, motivo, timestamp: new Date().toISOString() })]
   );
+  _setBloccoCache(true);  // effetto immediato su questa istanza
 }
 
 async function sbloccaSistema() {
@@ -763,12 +772,19 @@ async function sbloccaSistema() {
      ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
     [JSON.stringify({ bloccato: false, timestamp: new Date().toISOString() })]
   );
+  _setBloccoCache(false);  // effetto immediato su questa istanza
 }
 
 async function isSistemaBlocato() {
+  // Fast-path: cache valida → nessuna query DB (riduce il carico sotto grande affluenza)
+  if (_bloccoCache.value !== null && Date.now() < _bloccoCache.exp) {
+    return _bloccoCache.value;
+  }
   await initDatabase();
   const row = await pg.queryOne('SELECT value FROM state_persistence WHERE key = $1', ['sistema_blocco']);
-  return row?.value?.bloccato === true;
+  const bloccato = row?.value?.bloccato === true;
+  _setBloccoCache(bloccato);
+  return bloccato;
 }
 
 async function getStatoBlocco() {
