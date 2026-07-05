@@ -3,7 +3,7 @@
  *
  * Verifica che un wallet soddisfi i prerequisiti ROG prima di entrare in URANUS:
  *   1. Iscritto alla community ROG
- *   2. Almeno una donazione ROG completata (almeno 1 posizione)
+ *   2. Posizione ROG massima >= POSIZIONE_MINIMA_ROG
  *
  * Chiama il backend ROG via HTTP. Se ROG non è raggiungibile, BLOCCA per sicurezza
  * (fail-closed: nessun bypass possibile senza verifica positiva).
@@ -21,21 +21,18 @@ const ROG_BACKEND_URL = (process.env.ROG_BACKEND_URL || '').replace(/\/+$/, '');
 const POSIZIONE_MINIMA_ROG = 20488;
 
 // Chiave interna condivisa con ROG per gli endpoint server-to-server protetti
-// (/api/community/status, /api/donation-since). Inviata come header X-Internal-Key.
+// (/api/community/status, /api/position-threshold). Inviata come header X-Internal-Key.
 // DEVE coincidere con ROG_INTERNAL_API_KEY configurata sul backend ROG (Coolify).
 const ROG_INTERNAL_API_KEY = process.env.ROG_INTERNAL_API_KEY || '';
-// Data di riferimento del gate URANUS: vale SOLO una donazione ROG da questa data in poi
-// ("dopo la posizione 20488" = dall'8 giugno 2026).
-const ROG_DONATION_SINCE = process.env.ROG_DONATION_SINCE || '2026-06-08';
 
 function internalHeaders() {
   return ROG_INTERNAL_API_KEY ? { 'X-Internal-Key': ROG_INTERNAL_API_KEY } : {};
 }
 
-// ── Parametri verifica ON-CHAIN (doppia garanzia: donazione ROG Small ≥ 2 USDC alla cassa) ──
+// ── Parametri verifica ON-CHAIN (legacy/debug; non usati dal gate principale) ──
 // Wallet cassa ROG: destinatario delle donazioni ROG Small.
 const ROG_CASSA_WALLET = (process.env.CASSA_ROG_WALLET || process.env.ROG_WALLET_CASSA || process.env.ROG_WALLET_ADDRESS || '0xd5bcc7acc9d6862c784807134c1f70c3e7f9f790').toLowerCase();
-// Token USDC delle donazioni ROG recenti alla cassa ROG (gate URANUS da ROG_DONATION_SINCE).
+// Token USDC delle donazioni ROG recenti alla cassa ROG (usato solo dal check on-chain legacy).
 // VERIFICATO on-chain 02/07/2026: la cassa ROG 0xD5bCC7… detiene USDC NATIVO 0x3c49… (0 bridged).
 // Il vecchio ROGTreasuryController usava il bridged 0x2791…, ma le operazioni sono migrate al nativo
 // (script ROG USDC_OLD→USDC_NEW). Variabile DEDICATA, disaccoppiata da quella di URANUS.
@@ -97,7 +94,7 @@ async function checkCommunityRegistration(wallet) {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// CHECK ROG DONATION (almeno 1 posizione >= POSIZIONE_MINIMA_ROG)
+// CHECK ROG POSITION THRESHOLD (posizione massima >= POSIZIONE_MINIMA_ROG)
 // ════════════════════════════════════════════════════════════════════
 
 async function checkRogDonation(wallet) {
@@ -106,31 +103,31 @@ async function checkRogDonation(wallet) {
     return { hasDonation: false, error: 'ROG_BACKEND_URL non configurato' };
   }
 
-  // Endpoint CANONICO ROG per il gate URANUS: una donazione ROG >= 2 USDC dall'8/6/2026.
-  // ROG ha già verificato la tx on-chain prima di registrarla; "dopo la posizione 20488"
-  // equivale a "dall'8 giugno 2026 in poi". Protetto da X-Internal-Key.
-  const url = `${ROG_BACKEND_URL}/api/donation-since/${wallet}?since=${encodeURIComponent(ROG_DONATION_SINCE)}&minUsdc=2`;
+  // Endpoint canonico del gate URANUS: verifica posizione massima ROG del wallet.
+  // Requisito richiesto: max posizione >= POSIZIONE_MINIMA_ROG.
+  const url = `${ROG_BACKEND_URL}/api/position-threshold/${wallet}?minPosition=${encodeURIComponent(String(POSIZIONE_MINIMA_ROG))}`;
   const result = await httpGet(url, 8000, internalHeaders());
 
   if (!result.success) {
-    console.warn(`🔐 [ROG-Check] donation-since non raggiungibile per ${wallet}: ${result.reason || result.status}`);
+    console.warn(`🔐 [ROG-Check] position-threshold non raggiungibile per ${wallet}: ${result.reason || result.status}`);
     return { hasDonation: false, error: 'Backend ROG non raggiungibile' };
   }
 
   const data = result.data || {};
   const qualifies = !!data.qualifies;
-  const totalPositions = Number(data.count) || 0;
+  const totalPositions = Number(data.totalPositions) || 0;
+  const qualifyingPositions = Number(data.qualifyingPositions) || 0;
+  const maxPosition = Number(data.maxPosition) || 0;
 
-   
-
-  console.log(`🔐 [ROG-Check] ${wallet}: donazione ROG dal ${data.since || ROG_DONATION_SINCE} >= ${data.minUsdc || 2} USDC → ${qualifies ? '✅' : '❌'} (count=${totalPositions})`);
+  console.log(`🔐 [ROG-Check] ${wallet}: max posizione ${maxPosition} | soglia ${POSIZIONE_MINIMA_ROG} → ${qualifies ? '✅' : '❌'} (qualificanti=${qualifyingPositions}, totali=${totalPositions})`);
 
   return {
     hasDonation: qualifies,
-    totalPositions,
+    totalPositions: qualifyingPositions,
+    maxPosition,
+    allPositionsCount: totalPositions,
     hasQualifyingPosition: qualifies,
     posizioneMinima: POSIZIONE_MINIMA_ROG,
-    lastDonationDate: data.lastDonationDate || null,
   };
 }
 
@@ -254,14 +251,12 @@ async function checkAllPrerequisites(wallet) {
 
   console.log(`🔐 [ROG-Check] Verifica prerequisiti ROG per ${w}...`);
 
-  // Verifiche in parallelo (DOPPIA GARANZIA sulla donazione):
+  // Verifiche in parallelo:
   // 1. Iscrizione community ROG          (/api/community/status)
-  // 2. Donazione ROG >= 2 USDC dall'8/6   (/api/donation-since) — fonte canonica ROG
-  // 3. Conferma ON-CHAIN: >= 2 USDC alla cassa ROG su Polygon (fallback indipendente)
-  const [communityResult, donationResult, onChainResult, uranusResult] = await Promise.all([
+  // 2. Posizione massima ROG >= soglia    (/api/position-threshold)
+  const [communityResult, donationResult, uranusResult] = await Promise.all([
     checkCommunityRegistration(w),
     checkRogDonation(w),
-    checkRecentRogDonationOnChain(w),
     checkUranusDonation(w),
   ]);
 
@@ -269,12 +264,8 @@ async function checkAllPrerequisites(wallet) {
   // di ritorno → accesso diretto alla donazione, SENZA ripassare i gate ROG.
   const hasUranusDonation = uranusResult.hasUranusDonation;
 
-  // La donazione ROG è verificata se confermata da ALMENO una delle due fonti indipendenti:
-  //  - posizione ROG >= 20488 (ROG ha già verificato la tx on-chain prima di crearla), OPPURE
-  //  - conferma on-chain diretta (>= 2 USDC alla cassa ROG).
-  // Doppia garanzia: due percorsi indipendenti, maggiore robustezza e nessun blocco
-  // se uno dei due è temporaneamente non disponibile.
-  const donationVerified = donationResult.hasDonation || onChainResult.hasRecentDonation;
+  // Requisito ROG per URANUS: posizione massima >= soglia minima configurata.
+  const donationVerified = donationResult.hasDonation;
 
   const errors = [];
   if (!hasUranusDonation) {
@@ -282,14 +273,14 @@ async function checkAllPrerequisites(wallet) {
       errors.push(communityResult.error || 'Non iscritto alla community ROG');
     }
     if (!donationVerified) {
-      errors.push(donationResult.error || `Nessuna donazione ROG Small >= 2 USDC verificata (posizione >= ${POSIZIONE_MINIMA_ROG} o conferma on-chain)`);
+      errors.push(donationResult.error || `Nessuna posizione ROG >= ${POSIZIONE_MINIMA_ROG} verificata`);
     }
   }
 
   // canProceed = donatore di ritorno URANUS OPPURE (community ROG + donazione ROG verificata).
   const canProceed = hasUranusDonation || (communityResult.registered && donationVerified);
 
-  console.log(`🔐 [ROG-Check] Uranus pregresso: ${hasUranusDonation ? '✅ bypass' : '—'} | Community: ${communityResult.registered ? '✅' : '❌'} | Posizione >= ${POSIZIONE_MINIMA_ROG}: ${donationResult.hasDonation ? '✅' : '❌'} | On-chain >= 2 USDC: ${onChainResult.hasRecentDonation ? '✅' : '❌'} | Accesso: ${canProceed ? '✅ OK' : '❌ BLOCCATO'}`);
+  console.log(`🔐 [ROG-Check] Uranus pregresso: ${hasUranusDonation ? '✅ bypass' : '—'} | Community: ${communityResult.registered ? '✅' : '❌'} | Posizione >= ${POSIZIONE_MINIMA_ROG}: ${donationResult.hasDonation ? '✅' : '❌'} | Accesso: ${canProceed ? '✅ OK' : '❌ BLOCCATO'}`);
 
   return {
     canProceed,
@@ -297,8 +288,8 @@ async function checkAllPrerequisites(wallet) {
     rogDonationDone: donationVerified,
     hasUranusDonation,
     rogDonationViaPosition: donationResult.hasDonation,
-    rogDonationViaOnChain: onChainResult.hasRecentDonation,
-    onChainTx: onChainResult.latestTx || null,
+    rogDonationViaOnChain: false,
+    onChainTx: null,
     rogPositions: donationResult.totalPositions || 0,
     hasQualifyingPosition: donationResult.hasQualifyingPosition || false,
     posizioneMinima: POSIZIONE_MINIMA_ROG,
