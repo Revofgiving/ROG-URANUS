@@ -34,7 +34,8 @@ const TX_RETRY_DELAY_MS = Number(process.env.DONA_TX_RETRY_MS || 3000); // 3s = 
 // donatore è solo, dopo ALTERNANZA_GRACE_MS senza altri doni gli vengono assegnate
 // tutte le coppie restanti in sequenza. Disattivabile con ALTERNANZA_SOLIDALE=false.
 const ALTERNANZA_ON = process.env.ALTERNANZA_SOLIDALE !== 'false';
-const ALTERNANZA_GRACE_MS = Number(process.env.ALTERNANZA_GRACE_MS || 5 * 60 * 1000); // 5 minuti
+const ALTERNANZA_GRACE_RAW = Number(process.env.ALTERNANZA_GRACE_MS);
+const ALTERNANZA_GRACE_MS = Number.isFinite(ALTERNANZA_GRACE_RAW) ? Math.max(0, ALTERNANZA_GRACE_RAW) : 0; // default: flush immediato
 const waiting = []; // job di donatori soli in finestra di grazia
 
 // ── INIT: crea tabella coda se non esiste ──
@@ -278,8 +279,13 @@ async function processNext() {
       // Donatore solo: finestra di grazia prima di assegnargli il resto in sequenza.
       job.status = 'WAITING_GRACE';
       waiting.push(job);
-      job._graceTimer = setTimeout(() => flushRimanenti(job), ALTERNANZA_GRACE_MS);
-      console.log(`⏳ [Alternanza] ${job.wallet.substring(0, 10)} solo: attendo ${Math.round(ALTERNANZA_GRACE_MS / 60000)} min per altri doni prima del flush`);
+      if (ALTERNANZA_GRACE_MS <= 0) {
+        setImmediate(() => flushRimanenti(job));
+        console.log(`⚡ [Alternanza] ${job.wallet.substring(0, 10)} solo: flush immediato (grace=0ms)`);
+      } else {
+        job._graceTimer = setTimeout(() => flushRimanenti(job), ALTERNANZA_GRACE_MS);
+        console.log(`⏳ [Alternanza] ${job.wallet.substring(0, 10)} solo: attendo ${Math.round(ALTERNANZA_GRACE_MS / 60000)} min per altri doni prima del flush`);
+      }
     }
   } else if (requeue) {
     // tx ancora in pending: ri-accoda il job in fondo dopo un breve ritardo.
