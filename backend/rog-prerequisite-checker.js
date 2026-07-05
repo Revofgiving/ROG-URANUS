@@ -19,6 +19,8 @@ const ROG_BACKEND_URL = (process.env.ROG_BACKEND_URL || '').replace(/\/+$/, '');
 
 // Posizione minima ROG per accedere a URANUS (corrispondente all'8 giugno 2026)
 const POSIZIONE_MINIMA_ROG = 20488;
+// Fallback legacy: endpoint donation-since (utile durante rollout progressivo su ROG)
+const ROG_DONATION_SINCE = process.env.ROG_DONATION_SINCE || '2026-06-08';
 
 // Chiave interna condivisa con ROG per gli endpoint server-to-server protetti
 // (/api/community/status, /api/position-threshold). Inviata come header X-Internal-Key.
@@ -107,28 +109,58 @@ async function checkRogDonation(wallet) {
   // Requisito richiesto: max posizione >= POSIZIONE_MINIMA_ROG.
   const url = `${ROG_BACKEND_URL}/api/position-threshold/${wallet}?minPosition=${encodeURIComponent(String(POSIZIONE_MINIMA_ROG))}`;
   const result = await httpGet(url, 8000, internalHeaders());
+  if (result.success) {
+    const data = result.data || {};
+    const qualifies = !!data.qualifies;
+    const totalPositions = Number(data.totalPositions) || 0;
+    const qualifyingPositions = Number(data.qualifyingPositions) || 0;
+    const maxPosition = Number(data.maxPosition) || 0;
 
-  if (!result.success) {
-    console.warn(`🔐 [ROG-Check] position-threshold non raggiungibile per ${wallet}: ${result.reason || result.status}`);
-    return { hasDonation: false, error: 'Backend ROG non raggiungibile' };
+    console.log(`🔐 [ROG-Check] ${wallet}: max posizione ${maxPosition} | soglia ${POSIZIONE_MINIMA_ROG} → ${qualifies ? '✅' : '❌'} (qualificanti=${qualifyingPositions}, totali=${totalPositions})`);
+
+    return {
+      hasDonation: qualifies,
+      totalPositions: qualifyingPositions,
+      maxPosition,
+      allPositionsCount: totalPositions,
+      hasQualifyingPosition: qualifies,
+      posizioneMinima: POSIZIONE_MINIMA_ROG,
+    };
   }
 
-  const data = result.data || {};
-  const qualifies = !!data.qualifies;
-  const totalPositions = Number(data.totalPositions) || 0;
-  const qualifyingPositions = Number(data.qualifyingPositions) || 0;
-  const maxPosition = Number(data.maxPosition) || 0;
+  // Compatibilità: se /api/position-threshold non è ancora deployato su ROG,
+  // usiamo temporaneamente donation-since per evitare blocchi durante il rollout.
+  if (result.status === 404) {
+    console.warn(`🔐 [ROG-Check] position-threshold 404 per ${wallet} — fallback donation-since`);
+    const legacyUrl = `${ROG_BACKEND_URL}/api/donation-since/${wallet}?since=${encodeURIComponent(ROG_DONATION_SINCE)}&minUsdc=2`;
+    const legacy = await httpGet(legacyUrl, 8000, internalHeaders());
+    if (legacy.success) {
+      const data = legacy.data || {};
+      const qualifies = !!data.qualifies;
+      const count = Number(data.count) || 0;
+      console.log(`🔐 [ROG-Check] fallback donation-since ${wallet}: ${qualifies ? '✅' : '❌'} (count=${count})`);
+      return {
+        hasDonation: qualifies,
+        totalPositions: count,
+        hasQualifyingPosition: qualifies,
+        posizioneMinima: POSIZIONE_MINIMA_ROG,
+      };
+    }
+  }
 
-  console.log(`🔐 [ROG-Check] ${wallet}: max posizione ${maxPosition} | soglia ${POSIZIONE_MINIMA_ROG} → ${qualifies ? '✅' : '❌'} (qualificanti=${qualifyingPositions}, totali=${totalPositions})`);
+  // Fallback robusto finale: conferma on-chain diretta verso cassa ROG.
+  const onChain = await checkRecentRogDonationOnChain(wallet);
+  if (onChain.hasRecentDonation) {
+    return {
+      hasDonation: true,
+      totalPositions: 1,
+      hasQualifyingPosition: true,
+      posizioneMinima: POSIZIONE_MINIMA_ROG,
+    };
+  }
 
-  return {
-    hasDonation: qualifies,
-    totalPositions: qualifyingPositions,
-    maxPosition,
-    allPositionsCount: totalPositions,
-    hasQualifyingPosition: qualifies,
-    posizioneMinima: POSIZIONE_MINIMA_ROG,
-  };
+  console.warn(`🔐 [ROG-Check] position-threshold non raggiungibile per ${wallet}: ${result.reason || result.status}`);
+  return { hasDonation: false, error: 'Backend ROG non raggiungibile' };
 }
 
 // ════════════════════════════════════════════════════════════════════
