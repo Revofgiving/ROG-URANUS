@@ -64,29 +64,60 @@ function extractPositionNumbers(payload) {
 
 async function checkRogPositionFromDirectList(wallet) {
   if (!ROG_BACKEND_URL) return { hasDonation: false, error: 'ROG_BACKEND_URL non configurato' };
+  const evaluate = (numbers, source) => {
+    if (!Array.isArray(numbers) || numbers.length === 0) return null;
+    const maxPosition = Math.max(...numbers);
+    const qualifies = maxPosition >= POSIZIONE_MINIMA_ROG;
+    console.log(`🔐 [ROG-Check] fallback ${source} ${wallet}: max=${maxPosition} soglia=${POSIZIONE_MINIMA_ROG} -> ${qualifies ? '✅' : '❌'} (totali=${numbers.length})`);
+    return {
+      hasDonation: qualifies,
+      totalPositions: numbers.length,
+      maxPosition,
+      allPositionsCount: numbers.length,
+      hasQualifyingPosition: qualifies,
+      posizioneMinima: POSIZIONE_MINIMA_ROG,
+    };
+  };
 
-  // Fallback robusto: alcuni flussi speciali (es. carta regalo) possono
-  // comparire nella lista posizioni prima del calcolo sintetico threshold.
-  const url = `${ROG_BACKEND_URL}/api/posizione/${wallet}`;
-  const result = await httpGet(url, 8000, internalHeaders());
-  if (!result.success) {
-    return { hasDonation: false, error: result.reason || 'Lista posizioni ROG non raggiungibile' };
+  // 1) Compatibilità vecchi backend ROG
+  const urlLegacy = `${ROG_BACKEND_URL}/api/posizione/${wallet}`;
+  const legacy = await httpGet(urlLegacy, 8000, internalHeaders());
+  if (legacy.success) {
+    const out = evaluate(extractPositionNumbers(legacy.data || {}), 'api/posizione');
+    if (out) return out;
   }
 
-  const numbers = extractPositionNumbers(result.data || {});
-  const maxPosition = numbers.length ? Math.max(...numbers) : 0;
-  const qualifies = maxPosition >= POSIZIONE_MINIMA_ROG;
+  // 2) Backend ROG 29 giugno: endpoint ufficiale area personale (lista posizioni)
+  const urlSimple = `${ROG_BACKEND_URL}/api/user-positions-simple/${wallet}`;
+  const simple = await httpGet(urlSimple, 8000, internalHeaders());
+  if (simple.success) {
+    const out = evaluate(extractPositionNumbers(simple.data || {}), 'api/user-positions-simple');
+    if (out) return out;
+  }
 
-  console.log(`🔐 [ROG-Check] fallback lista posizioni ${wallet}: max=${maxPosition} soglia=${POSIZIONE_MINIMA_ROG} -> ${qualifies ? '✅' : '❌'} (totali=${numbers.length})`);
+  // 3) Lookup “Già iscritto”: fornisce prima/ultima posizione da PostgreSQL
+  const urlLookup = `${ROG_BACKEND_URL}/api/utente/lookup/${wallet}`;
+  const lookup = await httpGet(urlLookup, 8000, internalHeaders());
+  if (lookup.success) {
+    const data = lookup.data || {};
+    const found = !!(data.found || data.walletTrovato);
+    const total = Number(data.totalePosizioni) || 0;
+    const first = parsePositionNumber(data.primaPosizione);
+    const last = parsePositionNumber(data.ultimaPosizione);
+    const numbers = [first, last].filter((n) => n > 0);
+    if (found && numbers.length) {
+      const out = evaluate(numbers, 'api/utente/lookup');
+      if (out) {
+        if (total > out.totalPositions) {
+          out.totalPositions = total;
+          out.allPositionsCount = total;
+        }
+        return out;
+      }
+    }
+  }
 
-  return {
-    hasDonation: qualifies,
-    totalPositions: numbers.length,
-    maxPosition,
-    allPositionsCount: numbers.length,
-    hasQualifyingPosition: qualifies,
-    posizioneMinima: POSIZIONE_MINIMA_ROG,
-  };
+  return { hasDonation: false, error: 'Lista posizioni ROG non raggiungibile' };
 }
 
 // ── Parametri verifica ON-CHAIN (legacy/debug; non usati dal gate principale) ──
