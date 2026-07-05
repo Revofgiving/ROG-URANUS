@@ -139,12 +139,21 @@ async function getStatus(jobId) {
       [jobId]
     );
     if (row) {
-      return {
+      const payload = {
         jobId: row.id,
         status: row.status,
         result: row.result,
         processedAt: row.processed_at,
       };
+      const dbResult = row.result && typeof row.result === 'object' ? row.result : {};
+      if (row.status === 'FAILED') {
+        payload.error = dbResult.error || 'Donazione fallita';
+      } else if (row.status === 'PENDING_RETRY') {
+        payload.attempt = dbResult.attempt;
+        payload.maxAttempts = dbResult.maxAttempts || MAX_TX_ATTEMPTS;
+        payload.error = dbResult.error;
+      }
+      return payload;
     }
   } catch (_) {}
 

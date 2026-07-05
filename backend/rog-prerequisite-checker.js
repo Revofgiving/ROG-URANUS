@@ -31,6 +31,64 @@ function internalHeaders() {
   return ROG_INTERNAL_API_KEY ? { 'X-Internal-Key': ROG_INTERNAL_API_KEY } : {};
 }
 
+function parsePositionNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function extractPositionNumbers(payload) {
+  const numbers = [];
+  const fields = ['numero_posizione', 'numeroPosizione', 'position', 'posizione', 'position_number', 'positionNumber'];
+
+  const collectFromItem = (item) => {
+    if (!item || typeof item !== 'object') return;
+    for (const key of fields) {
+      const n = parsePositionNumber(item[key]);
+      if (n > 0) numbers.push(n);
+    }
+  };
+
+  if (!payload || typeof payload !== 'object') return numbers;
+
+  const roots = [payload, payload.data || null];
+  for (const root of roots) {
+    if (!root || typeof root !== 'object') continue;
+    const arrays = [root.positions, root.posizioni];
+    for (const arr of arrays) {
+      if (Array.isArray(arr)) arr.forEach(collectFromItem);
+    }
+  }
+
+  return numbers;
+}
+
+async function checkRogPositionFromDirectList(wallet) {
+  if (!ROG_BACKEND_URL) return { hasDonation: false, error: 'ROG_BACKEND_URL non configurato' };
+
+  // Fallback robusto: alcuni flussi speciali (es. carta regalo) possono
+  // comparire nella lista posizioni prima del calcolo sintetico threshold.
+  const url = `${ROG_BACKEND_URL}/api/posizione/${wallet}`;
+  const result = await httpGet(url, 8000, internalHeaders());
+  if (!result.success) {
+    return { hasDonation: false, error: result.reason || 'Lista posizioni ROG non raggiungibile' };
+  }
+
+  const numbers = extractPositionNumbers(result.data || {});
+  const maxPosition = numbers.length ? Math.max(...numbers) : 0;
+  const qualifies = maxPosition >= POSIZIONE_MINIMA_ROG;
+
+  console.log(`🔐 [ROG-Check] fallback lista posizioni ${wallet}: max=${maxPosition} soglia=${POSIZIONE_MINIMA_ROG} -> ${qualifies ? '✅' : '❌'} (totali=${numbers.length})`);
+
+  return {
+    hasDonation: qualifies,
+    totalPositions: numbers.length,
+    maxPosition,
+    allPositionsCount: numbers.length,
+    hasQualifyingPosition: qualifies,
+    posizioneMinima: POSIZIONE_MINIMA_ROG,
+  };
+}
+
 // ── Parametri verifica ON-CHAIN (legacy/debug; non usati dal gate principale) ──
 // Wallet cassa ROG: destinatario delle donazioni ROG Small.
 const ROG_CASSA_WALLET = (process.env.CASSA_ROG_WALLET || process.env.ROG_WALLET_CASSA || process.env.ROG_WALLET_ADDRESS || '0xd5bcc7acc9d6862c784807134c1f70c3e7f9f790').toLowerCase();
@@ -118,6 +176,13 @@ async function checkRogDonation(wallet) {
 
     console.log(`🔐 [ROG-Check] ${wallet}: max posizione ${maxPosition} | soglia ${POSIZIONE_MINIMA_ROG} → ${qualifies ? '✅' : '❌'} (qualificanti=${qualifyingPositions}, totali=${totalPositions})`);
 
+    // Se il sintetico non qualifica, prova la lista diretta (copre ingressi
+    // da canali speciali come carta regalo).
+    if (!qualifies) {
+      const direct = await checkRogPositionFromDirectList(wallet);
+      if (direct.hasDonation) return direct;
+    }
+
     return {
       hasDonation: qualifies,
       totalPositions: qualifyingPositions,
@@ -132,6 +197,8 @@ async function checkRogDonation(wallet) {
   // usiamo temporaneamente donation-since per evitare blocchi durante il rollout.
   if (result.status === 404) {
     console.warn(`🔐 [ROG-Check] position-threshold 404 per ${wallet} — fallback donation-since`);
+    const direct = await checkRogPositionFromDirectList(wallet);
+    if (direct.hasDonation) return direct;
     const legacyUrl = `${ROG_BACKEND_URL}/api/donation-since/${wallet}?since=${encodeURIComponent(ROG_DONATION_SINCE)}&minUsdc=2`;
     const legacy = await httpGet(legacyUrl, 8000, internalHeaders());
     if (legacy.success) {
@@ -149,6 +216,8 @@ async function checkRogDonation(wallet) {
   }
 
   // Fallback robusto finale: conferma on-chain diretta verso cassa ROG.
+  const direct = await checkRogPositionFromDirectList(wallet);
+  if (direct.hasDonation) return direct;
   const onChain = await checkRecentRogDonationOnChain(wallet);
   if (onChain.hasRecentDonation) {
     return {
