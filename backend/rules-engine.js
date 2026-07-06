@@ -148,6 +148,7 @@ function regolaTicketGemello(gemelloOrdine) {
 function regolaRilasciFunzioni(tipoAccount) {
   switch (tipoAccount) {
     case 'PRIMARIO':
+    case 'CASSA':
     case 'FONDO':
       return { rilasciaPerpetuo: true, rilasciaGemello: true, rilasciaSimbionti: true, rilasciaCrediti: true };
     case 'PERPETUO':

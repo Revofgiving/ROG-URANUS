@@ -91,6 +91,42 @@ async function initGiftTables() {
 
   console.log('🎁 [GiftManager] Tabelle doni_pendenti + messaggi pronte');
 }
+/**
+ * Recupera doni pendenti per area admin (tutti i wallet).
+ * Include check sintetici per prevenire doppio payout.
+ */
+async function getDoniPendentiAdmin({ limit = 200, offset = 0 } = {}) {
+  const [doni, duplicates] = await Promise.all([
+    pg.queryMany(
+      `SELECT * FROM doni_pendenti WHERE status = 'PENDING' ORDER BY created_at ASC LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    ),
+    pg.queryMany(
+      `SELECT event_key, COUNT(*)::int AS cnt
+       FROM doni_pendenti
+       WHERE event_key IS NOT NULL
+       GROUP BY event_key`
+    )
+  ]);
+  const dupMap = new Map(duplicates.map(d => [d.event_key, Number(d.cnt)]));
+  return doni.map(d => {
+    const numeroUscita = d.dettagli?.numeroUscita || null;
+    const turnoMatch = typeof numeroUscita === 'string' ? /L3-turno-(\d+)/.exec(numeroUscita) : null;
+    const turno = turnoMatch ? Number(turnoMatch[1]) : null;
+    return {
+    ...d,
+    priority: d.id === 3 ? 'HIGH' : 'NORMAL',
+    l3_turno: turno,
+    causale: d.dettagli?.causale || null,
+    checks: {
+      status_pending: d.status === 'PENDING',
+      tx_hash_null: !d.tx_hash,
+      importo_480: Number(d.importo) === 480,
+      event_key_unique: d.event_key ? (dupMap.get(d.event_key) || 0) === 1 : false,
+    }
+  };
+  });
+}
 
 // ════════════════════════════════════════════════════════════════════
 // CREAZIONE DONO PENDENTE
@@ -249,6 +285,23 @@ async function accettaDono(donoId, wallet) {
     throw new Error('Dono non trovato, già accettato o in elaborazione');
   }
 
+  // Guard-rail: evita doppio payout su stesso event_key o record già con tx_hash
+  if (dono.tx_hash) {
+    await pg.query(`UPDATE doni_pendenti SET status = 'PENDING' WHERE id = $1 AND status = 'PROCESSING'`, [donoId]);
+    throw new Error('Dono già associato a tx_hash — payout bloccato');
+  }
+  if (dono.event_key) {
+    const dup = await pg.queryOne(
+      `SELECT id FROM doni_pendenti
+       WHERE event_key = $1 AND id <> $2 AND status IN ('ACCEPTED','PROCESSING')`,
+      [dono.event_key, donoId]
+    );
+    if (dup) {
+      await pg.query(`UPDATE doni_pendenti SET status = 'PENDING' WHERE id = $1 AND status = 'PROCESSING'`, [donoId]);
+      throw new Error('Event key già completata — payout bloccato');
+    }
+  }
+
   // 🔐 GATE APPROVAZIONE ISA (mod 4A): durante la finestra (GIFT_APPROVAL_UNTIL) il dono
   // NON parte subito: va in ATTESA_APPROVAZIONE e viene inviato solo col "si" di Isa su
   // Telegram. Non blocca nient'altro: riguarda solo questo dono.
@@ -329,6 +382,21 @@ async function approvaDono(donoId) {
   if (!dono) {
     const row = await pg.queryOne(`SELECT status FROM doni_pendenti WHERE id = $1`, [donoId]);
     return { success: false, alreadyHandled: true, status: row ? row.status : 'NOT_FOUND' };
+  }
+  if (dono.tx_hash) {
+    await pg.query(`UPDATE doni_pendenti SET status = 'ATTESA_APPROVAZIONE' WHERE id = $1 AND status = 'PROCESSING'`, [donoId]);
+    return { success: false, error: 'Dono già associato a tx_hash' };
+  }
+  if (dono.event_key) {
+    const dup = await pg.queryOne(
+      `SELECT id FROM doni_pendenti
+       WHERE event_key = $1 AND id <> $2 AND status IN ('ACCEPTED','PROCESSING')`,
+      [dono.event_key, donoId]
+    );
+    if (dup) {
+      await pg.query(`UPDATE doni_pendenti SET status = 'ATTESA_APPROVAZIONE' WHERE id = $1 AND status = 'PROCESSING'`, [donoId]);
+      return { success: false, error: 'Event key già completata' };
+    }
   }
   const res = await _eseguiPayoutDono(dono);
   if (!res.success) {
@@ -446,13 +514,38 @@ async function inviaMessaggio(wallet, { subject, content, type = 'system', giftI
 }
 
 /**
- * Recupera messaggi per un wallet (più recenti prima).
+ * Normalizza paginazione.
  */
-async function getMessaggi(wallet, limit = 50) {
-  return pg.queryMany(
-    `SELECT * FROM messaggi WHERE recipient_wallet = $1 ORDER BY created_at DESC LIMIT $2`,
-    [wallet.toLowerCase(), limit]
-  );
+function normalizePagination({ page = 1, pageSize = 20 } = {}) {
+  const safePage = Math.max(1, Number(page) || 1);
+  const safePageSize = Math.min(100, Math.max(1, Number(pageSize) || 20));
+  const offset = (safePage - 1) * safePageSize;
+  return { page: safePage, pageSize: safePageSize, offset };
+}
+
+/**
+ * Recupera messaggi per un wallet (più recenti prima), con paginazione.
+ */
+async function getMessaggi(wallet, options = {}) {
+  const { page, pageSize, offset } = normalizePagination(options);
+  const recipient = wallet.toLowerCase();
+  const [messaggi, totalRow] = await Promise.all([
+    pg.queryMany(
+      `SELECT * FROM messaggi WHERE recipient_wallet = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      [recipient, pageSize, offset]
+    ),
+    pg.queryOne(`SELECT COUNT(*)::int AS total FROM messaggi WHERE recipient_wallet = $1`, [recipient]),
+  ]);
+  const total = Number(totalRow?.total) || 0;
+  return {
+    items: messaggi,
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    },
+  };
 }
 
 /**
@@ -482,39 +575,83 @@ async function contaNonLetti(wallet) {
 // ════════════════════════════════════════════════════════════════════
 
 /**
- * Recupera doni pendenti per un wallet.
+ * Recupera doni pendenti per un wallet (paginati).
  */
-async function getDoniPendenti(wallet) {
-  const doni = await pg.queryMany(
-    `SELECT *, 
+async function getDoniPendenti(wallet, options = {}) {
+  const { page, pageSize, offset } = normalizePagination(options);
+  const w = wallet.toLowerCase();
+  const [doni, totalRow] = await Promise.all([
+    pg.queryMany(
+      `SELECT *, 
        EXTRACT(EPOCH FROM (expires_at - NOW())) / 86400 AS giorni_rimanenti
      FROM doni_pendenti 
      WHERE wallet = $1 AND status = 'PENDING' 
-     ORDER BY created_at ASC`,
-    [wallet.toLowerCase()]
-  );
-  if (!doni.length) return doni;
+     ORDER BY created_at ASC
+     LIMIT $2 OFFSET $3`,
+      [w, pageSize, offset]
+    ),
+    pg.queryOne(
+      `SELECT COUNT(*)::int AS total FROM doni_pendenti WHERE wallet = $1 AND status = 'PENDING'`,
+      [w]
+    ),
+  ]);
+  if (!doni.length) {
+    const total = Number(totalRow?.total) || 0;
+    return {
+      items: [],
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
+    };
+  }
   // "pronto" = il dono è distribuibile ORA, cioè i fondi sono già presenti nel
   // wallet cassa URANUS (saldo ≥ importo). Il bottone "ACCETTA DONO" è cliccabile
   // solo quando pronto === true. Se il saldo non è leggibile → pronto false (gate
   // finale comunque applicato in accettaDono).
   let saldoCassa = null;
   try { saldoCassa = await require('./payout-manager').getSaldoTreasury(); } catch (_) {}
-  return doni.map(d => ({
-    ...d,
-    saldoCassa,
-    pronto: saldoCassa == null ? false : Number(saldoCassa) >= Number(d.importo),
-  }));
+  const total = Number(totalRow?.total) || 0;
+  return {
+    items: doni.map(d => ({
+      ...d,
+      saldoCassa,
+      pronto: saldoCassa == null ? false : Number(saldoCassa) >= Number(d.importo),
+    })),
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    },
+  };
 }
 
 /**
- * Recupera storico doni (tutti gli status).
+ * Recupera storico doni (tutti gli status), con paginazione.
  */
-async function getStoricoDoni(wallet) {
-  return pg.queryMany(
-    `SELECT * FROM doni_pendenti WHERE wallet = $1 ORDER BY created_at DESC LIMIT 50`,
-    [wallet.toLowerCase()]
-  );
+async function getStoricoDoni(wallet, options = {}) {
+  const { page, pageSize, offset } = normalizePagination(options);
+  const w = wallet.toLowerCase();
+  const [storico, totalRow] = await Promise.all([
+    pg.queryMany(
+      `SELECT * FROM doni_pendenti WHERE wallet = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+      [w, pageSize, offset]
+    ),
+    pg.queryOne(`SELECT COUNT(*)::int AS total FROM doni_pendenti WHERE wallet = $1`, [w]),
+  ]);
+  const total = Number(totalRow?.total) || 0;
+  return {
+    items: storico,
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    },
+  };
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -599,6 +736,7 @@ module.exports = {
   notificaDoniPronti,
   processaScadenze,
   getDoniPendenti,
+  getDoniPendentiAdmin,
   getStoricoDoni,
   correggiWalletDonoPending,
   inviaMessaggio,

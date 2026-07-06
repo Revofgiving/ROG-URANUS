@@ -252,6 +252,32 @@ CREATE TABLE IF NOT EXISTS bridge_log (
   created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Uscite L3 (tracciamento completo ciclo economico/logistico)
+CREATE TABLE IF NOT EXISTS uscite_l3 (
+  id                SERIAL PRIMARY KEY,
+  wallet            TEXT NOT NULL,
+  tipo_account      TEXT NOT NULL,
+  turno             INTEGER,
+  lordo_l3          NUMERIC(12,2),
+  trattenuta_funzioni NUMERIC(12,2),
+  costo_rog         NUMERIC(12,2),
+  costo_nettuno     NUMERIC(12,2),
+  costo_pharaoh     NUMERIC(12,2),
+  netto_previsto    NUMERIC(12,2),
+  netto_registrato  NUMERIC(12,2),
+  netto_inviato     NUMERIC(12,2),
+  event_key         TEXT UNIQUE,
+  status            TEXT NOT NULL DEFAULT 'PENDING_FUNCTIONS',
+  funzioni          JSONB,
+  rog               JSONB,
+  nettuno           JSONB,
+  pharaoh           JSONB,
+  payout            JSONB,
+  error             TEXT,
+  created_at        TIMESTAMPTZ DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Predisposizioni (pre-mappatura deterministica tavole e funzioni)
 -- Chiave PER-INGRESSO: ogni posizione (tavola di sdoppiamento) ha il proprio percorso futuro.
 CREATE TABLE IF NOT EXISTS predisposizioni (
@@ -293,6 +319,9 @@ CREATE INDEX IF NOT EXISTS idx_coda_fifo_wallet    ON coda_fifo(wallet);
 CREATE INDEX IF NOT EXISTS idx_storico_fifo_wallet ON storico_uscite_fifo(wallet);
 CREATE INDEX IF NOT EXISTS idx_flussi_tipo         ON flussi_esterni(tipo);
 CREATE INDEX IF NOT EXISTS idx_bridge_wallet       ON bridge_log(wallet);
+CREATE INDEX IF NOT EXISTS idx_uscite_l3_wallet     ON uscite_l3(wallet);
+CREATE INDEX IF NOT EXISTS idx_uscite_l3_status     ON uscite_l3(status);
+CREATE INDEX IF NOT EXISTS idx_uscite_l3_turno      ON uscite_l3(turno);
 `;
 
 // ========================================
@@ -744,6 +773,115 @@ async function registraAvanzamento({ wallet, tipoAccount, daLivello, aLivello, d
 }
 
 // ========================================
+// USCITE L3 (tracking ciclo completo)
+// ========================================
+
+async function upsertUscitaL3(data) {
+  await initDatabase();
+  const {
+    wallet,
+    tipoAccount,
+    turno,
+    lordoL3,
+    trattenutaFunzioni,
+    costoRog,
+    costoNettuno,
+    costoPharaoh,
+    nettoPrevisto,
+    nettoRegistrato,
+    nettoInviato,
+    eventKey,
+    status,
+    funzioni,
+    rog,
+    nettuno,
+    pharaoh,
+    payout,
+    error,
+  } = data;
+
+  return await pg.queryOne(
+    `INSERT INTO uscite_l3
+      (wallet, tipo_account, turno, lordo_l3, trattenuta_funzioni, costo_rog, costo_nettuno, costo_pharaoh,
+       netto_previsto, netto_registrato, netto_inviato, event_key, status, funzioni, rog, nettuno, pharaoh, payout, error)
+     VALUES
+      ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+     ON CONFLICT (event_key) DO UPDATE SET
+      wallet = EXCLUDED.wallet,
+      tipo_account = EXCLUDED.tipo_account,
+      turno = EXCLUDED.turno,
+      lordo_l3 = COALESCE(EXCLUDED.lordo_l3, uscite_l3.lordo_l3),
+      trattenuta_funzioni = COALESCE(EXCLUDED.trattenuta_funzioni, uscite_l3.trattenuta_funzioni),
+      costo_rog = COALESCE(EXCLUDED.costo_rog, uscite_l3.costo_rog),
+      costo_nettuno = COALESCE(EXCLUDED.costo_nettuno, uscite_l3.costo_nettuno),
+      costo_pharaoh = COALESCE(EXCLUDED.costo_pharaoh, uscite_l3.costo_pharaoh),
+      netto_previsto = COALESCE(EXCLUDED.netto_previsto, uscite_l3.netto_previsto),
+      netto_registrato = COALESCE(EXCLUDED.netto_registrato, uscite_l3.netto_registrato),
+      netto_inviato = COALESCE(EXCLUDED.netto_inviato, uscite_l3.netto_inviato),
+      status = COALESCE(EXCLUDED.status, uscite_l3.status),
+      funzioni = COALESCE(EXCLUDED.funzioni, uscite_l3.funzioni),
+      rog = COALESCE(EXCLUDED.rog, uscite_l3.rog),
+      nettuno = COALESCE(EXCLUDED.nettuno, uscite_l3.nettuno),
+      pharaoh = COALESCE(EXCLUDED.pharaoh, uscite_l3.pharaoh),
+      payout = COALESCE(EXCLUDED.payout, uscite_l3.payout),
+      error = COALESCE(EXCLUDED.error, uscite_l3.error),
+      updated_at = NOW()
+     RETURNING *`,
+    [
+      wallet.toLowerCase(),
+      tipoAccount,
+      turno ?? null,
+      lordoL3 ?? null,
+      trattenutaFunzioni ?? null,
+      costoRog ?? null,
+      costoNettuno ?? null,
+      costoPharaoh ?? null,
+      nettoPrevisto ?? null,
+      nettoRegistrato ?? null,
+      nettoInviato ?? null,
+      eventKey ?? null,
+      status ?? null,
+      funzioni ? JSON.stringify(funzioni) : null,
+      rog ? JSON.stringify(rog) : null,
+      nettuno ? JSON.stringify(nettuno) : null,
+      pharaoh ? JSON.stringify(pharaoh) : null,
+      payout ? JSON.stringify(payout) : null,
+      error ?? null,
+    ]
+  );
+}
+
+async function aggiornaUscitaL3(eventKey, updates = {}) {
+  await initDatabase();
+  const fields = [];
+  const values = [];
+  let idx = 1;
+
+  const jsonFields = new Set(['funzioni', 'rog', 'nettuno', 'pharaoh', 'payout']);
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+    if (jsonFields.has(key)) {
+      fields.push(`${key} = $${idx}`);
+      values.push(value ? JSON.stringify(value) : null);
+    } else {
+      const column = key
+        .replace(/([A-Z])/g, '_$1')
+        .toLowerCase();
+      fields.push(`${column} = $${idx}`);
+      values.push(value);
+    }
+    idx += 1;
+  }
+  if (fields.length === 0) return null;
+  fields.push(`updated_at = NOW()`);
+  values.push(eventKey);
+  return await pg.queryOne(
+    `UPDATE uscite_l3 SET ${fields.join(', ')} WHERE event_key = $${idx} RETURNING *`,
+    values
+  );
+}
+
+// ========================================
 // KILL SWITCH
 // ========================================
 
@@ -812,5 +950,6 @@ module.exports = {
   createDonoCredito, assegnaDoniCredito,
   getState, setState,
   registraAvanzamento,
+  upsertUscitaL3, aggiornaUscitaL3,
   bloccaSistema, sbloccaSistema, isSistemaBlocato, getStatoBlocco
 };

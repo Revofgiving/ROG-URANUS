@@ -60,6 +60,17 @@ process.on('unhandledRejection', (reason) => {
   console.error('\ud83d\udedf [unhandledRejection]', msg);
   try { require('./alert-manager').sendAlert('CRITICAL', 'UNHANDLED_REJECTION', String(msg).slice(0, 300)); } catch (_) {}
 });
+
+// [ADMIN] Lista doni pendenti (tutti i wallet) con priorità e check sintetici
+app.get('/api/admin/doni-pendenti', async (req, res) => {
+  if (!checkAdmin(req, res)) return;
+  try {
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit || 200)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+    const items = await giftManager.getDoniPendentiAdmin({ limit, offset });
+    res.json({ success: true, items, count: items.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 process.on('uncaughtException', (err) => {
   console.error('\ud83d\udedf [uncaughtException]', err && err.stack ? err.stack : err);
   try { require('./alert-manager').sendAlert('CRITICAL', 'UNCAUGHT_EXCEPTION', String(err && err.message ? err.message : err).slice(0, 300)); } catch (_) {}

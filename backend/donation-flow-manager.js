@@ -717,10 +717,27 @@ async function gestisciUscitaFaraone(turno) {
     netto: uscita.netto, evento: 'USCITA_L3',
     dettagli: { uscita, funzioni: { simbionti: funzioni.simbionti.length, perpetuo: !!funzioni.perpetuo, gemello: !!funzioni.gemello } }
   });
+  const eventKeyL3 = `rog-l3-turno-${turno.numero_turno}-${String(faraoneWallet).toLowerCase()}`;
+  await db.upsertUscitaL3({
+    wallet: faraoneWallet,
+    tipoAccount,
+    turno: turno.numero_turno,
+    lordoL3: uscita.lordoEffettivo,
+    trattenutaFunzioni: uscita.trattenutaCassa || 0,
+    nettoRegistrato: uscita.netto,
+    eventKey: eventKeyL3,
+    status: 'PENDING_ROG',
+    funzioni: {
+      simbionti: funzioni.simbionti.length,
+      perpetuo: !!funzioni.perpetuo,
+      gemello: !!funzioni.gemello,
+      crediti: funzioni.crediti.length
+    }
+  });
 
   // 🌉 BRIDGE: auto-entry in URANO 1 (FIFO) + deduzioni ROG/PHARAON
   const nomeAccount = account?.nome || faraoneWallet.substring(0, 10);
-  const bridgeResult = await bridge.hookUscitaL3(faraoneWallet, nomeAccount, tipoAccount, uscita.netto, turno.numero_turno);
+  const bridgeResult = await bridge.hookUscitaL3(faraoneWallet, nomeAccount, tipoAccount, uscita.netto, turno.numero_turno, eventKeyL3);
 
   // Secondario → L4
   if (uscita.passaAlL4) {

@@ -125,6 +125,32 @@ async function registraRogSmall(wallet, numIngressi, importoTotale, origine) {
 }
 
 /**
+ * Handshake idempotente ROG SMALL (L3) con event_key
+ *
+ * @param {Object} payload
+ * @param {string} payload.eventKey
+ * @param {string} payload.walletOrigine
+ * @param {string} payload.walletBeneficiario
+ * @param {string} payload.walletCassa
+ * @param {number} payload.numIngressi
+ * @param {number} payload.importoTotale
+ * @param {string} payload.origine
+ */
+async function registraRogSmallL3(payload) {
+  return postToPlatform(ROG_BACKEND_URL, '/api/cross/uranus/rog-small', {
+    platform: PLATFORM_NAME,
+    event_key: payload.eventKey,
+    wallet_origine: payload.walletOrigine,
+    wallet_beneficiario: payload.walletBeneficiario,
+    wallet_cassa: payload.walletCassa,
+    num_ingressi: payload.numIngressi,
+    importo_totale: payload.importoTotale,
+    origine: payload.origine,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+/**
  * Registra un ingresso PHARAOH singolo su ROG (interim: rientri Sole)
  *
  * @param {string} wallet - Wallet dell'utente
@@ -254,7 +280,7 @@ function getStatus() {
     platformName: PLATFORM_NAME,
     protocolVersion: '1.0',
     supportedEndpoints: {
-      outgoing: ['POST /api/cross/dona', 'POST /api/cross/rog-small', 'POST /api/cross/notifica'],
+      outgoing: ['POST /api/cross/dona', 'POST /api/cross/rog-small', 'POST /api/cross/uranus/rog-small', 'POST /api/cross/notifica'],
       incoming: ['POST /api/cross/dona', 'POST /api/cross/rog-small', 'POST /api/cross/ingresso', 'POST /api/cross/notifica'],
     },
   };
@@ -263,6 +289,7 @@ function getStatus() {
 module.exports = {
   // Outgoing calls (specifici)
   registraRogSmall,
+  registraRogSmallL3,
   registraPharaohSuRog,
   registraIngressoPharaoh,
   // Outgoing calls (generici — bidirezionali)

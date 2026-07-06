@@ -31,6 +31,7 @@ const goldConverter    = require('./gold-converter');
 const giftManager      = require('./gift-manager');
 const cassaTransfer    = require('./cassa-transfer-manager');
 const { URANUS_CASSA_WALLET } = require('./wallet-cassa'); // 🏛️ UNICO riferimento cassa Uranus
+const ROG_CASSA_WALLET = (process.env.CASSA_ROG_WALLET || process.env.ROG_WALLET_CASSA || process.env.ROG_WALLET_ADDRESS || '0xD5bCC7acc9d6862c784807134c1F70c3e7f9F790').toLowerCase();
 
 // ── RIENTRO A SOLE (L0) ─────────────────────────────────────────
 // Posiziona una singola posizione nella tavola attiva del livello Sole.
@@ -104,9 +105,10 @@ const BRIDGE = {
  * @param {string} tipoAccount - PRIMARIO | PERPETUO | GEMELLO | FONDO
  * @param {number} nettoOriginale - Netto calcolato da URANO 2 (610 Primario, 110 Secondario)
  * @param {number} numeroTurno - Numero turno uscita
+ * @param {string} eventKey - Event key idempotente per bridge ROG
  * @returns {Object} Dettaglio deduzioni e netto finale
  */
-async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTurno) {
+async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTurno, eventKey) {
   console.log(`\n🌉 BRIDGE — Uscita URANO 2 L3 (Venere) → Nettuno`);
   console.log(`   Wallet: ${wallet.substring(0, 12)}...`);
   console.log(`   Tipo: ${tipoAccount}`);
@@ -116,11 +118,17 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
   const deduzioni = [];
   const cassaWallet = URANUS_CASSA_WALLET;
   const isSecondario = tipoAccount === 'PERPETUO' || tipoAccount === 'GEMELLO';
+  const eventKeyL3 = eventKey || `rog-l3-turno-${numeroTurno}-${String(wallet).toLowerCase()}`;
+  const uscitaStatus = {
+    funzioniOk: true,
+    rogOk: isSecondario,
+    nettunoOk: false,
+    pharaohOk: isSecondario,
+    payoutOk: false,
+  };
 
   // 1. AUTO-ENTRY Nettuno + eventuale Sole L0 URANUS
   //    PRIMARIO : DUAL Nettuno (1 CASSA + 1 HUMAN) = −20 USDC
-  //    FONDO    : DUAL Nettuno (1 CASSA + 1 Fortunato) MA SENZA costo (LEGGE COMMITTENTE:
-  //               la posizione 0 è l'origine, forma il dual ma non dona i 20 in Nettuno → resta 500)
   //    SECONDARIO: 1 HUMAN Nettuno (−10 USDC) + 1 rientro Sole L0 URANUS (−10 USDC)
   if (!isSecondario) {
     // PRIMARIO / FONDO: DUAL entry Nettuno (1 CASSA + 1 uscente)
@@ -130,13 +138,23 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
     const pHuman = await queue.aggiungiPosizione({
       wallet, nome: `${nome} (da URANO 2 L3)`, tipo: 'HUMAN',
     });
-    const costoDual = (tipoAccount === 'FONDO') ? 0 : BRIDGE.COSTO_ENTRY_FIFO;
-    nettoFinale -= costoDual;  // FONDO: 0 (non paga il Nettuno); PRIMARIO: −20
+    const costoDual = BRIDGE.COSTO_ENTRY_FIFO;
+    nettoFinale -= costoDual;
     deduzioni.push({
       tipo: 'ENTRY_FIFO_DUAL', importo: costoDual,
-      dettaglio: `DUAL Nettuno: CASSA pos ${pCassa.posizione}, HUMAN pos ${pHuman.posizione}${tipoAccount === 'FONDO' ? ' (FONDO/origine: senza costo)' : ''}`
+      dettaglio: `DUAL Nettuno: CASSA pos ${pCassa.posizione}, HUMAN pos ${pHuman.posizione}`
     });
     console.log(`   ✅ Nettuno DUAL: CASSA pos ${pCassa.posizione}, HUMAN pos ${pHuman.posizione} (−${costoDual} USDC)`);
+    uscitaStatus.nettunoOk = true;
+    await db.aggiornaUscitaL3(eventKeyL3, {
+      costoNettuno: costoDual,
+      nettuno: {
+        tipo: 'DUAL',
+        costo: costoDual,
+        posizioni: { cassa: pCassa.posizione, human: pHuman.posizione },
+      },
+      status: 'PENDING_ROG'
+    });
   } else {
     // SECONDARIO: 1 HUMAN in Nettuno (−10) + 1 rientro Sole L0 URANUS (−10)
     const pHuman = await queue.aggiungiPosizione({
@@ -160,11 +178,21 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
       dettaglio: `1 rientro Sole L0 URANUS a nome ${wallet.substring(0, 10)}`
     });
     console.log(`   ✅ Secondario: Nettuno HUMAN pos ${pHuman.posizione} (−${BRIDGE.COSTO_ENTRY_FIFO_SECONDARIO}) + Sole L0 URANUS (−${BRIDGE.L3_SOLE_L0_SECONDARIO}) USDC`);
+    uscitaStatus.nettunoOk = true;
+    await db.aggiornaUscitaL3(eventKeyL3, {
+      costoNettuno: BRIDGE.COSTO_ENTRY_FIFO_SECONDARIO,
+      nettuno: {
+        tipo: 'SINGOLO',
+        costo: BRIDGE.COSTO_ENTRY_FIFO_SECONDARIO,
+        posizioni: { human: pHuman.posizione }
+      },
+      status: 'PENDING_PAYOUT'
+    });
   }
 
   // 2. ROG SMALL (5 ingressi dual) + PHARAOH (100 USDC singolo, ACCANTONATO in cassa: PHARAOH_PENDING)
   //    Solo per Account Primario
-  if (tipoAccount === 'PRIMARIO' || tipoAccount === 'FONDO') {
+  if (!isSecondario) {
     nettoFinale -= BRIDGE.L3_DEDUZIONE_TOTALE;
 
     // 5 ingressi dual ROG SMALL (10 posizioni: 5 utente + 5 sistema) = −10 USDC
@@ -197,8 +225,37 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
     await cassaTransfer.registraTrasferimento({
       destinazione: 'ROG', importo: BRIDGE.L3_ROG_SMALL_COSTO,
       origineWallet: wallet, motivo: `ROG_SMALL_BRIDGE_L3 ${wallet}`,
-      eventKey: `rog-l3-turno-${numeroTurno}`,
+      eventKey: eventKeyL3,
     });
+    uscitaStatus.pharaohOk = true;
+    await db.aggiornaUscitaL3(eventKeyL3, {
+      costoRog: BRIDGE.L3_ROG_SMALL_COSTO,
+      costoPharaoh: BRIDGE.L3_PHARAOH_COSTO,
+      pharaoh: { tipo: 'PHARAOH_PENDING_L3', importo: BRIDGE.L3_PHARAOH_COSTO },
+      status: 'PENDING_ROG'
+    });
+    const rogResp = await crossPlatform.registraRogSmallL3({
+      eventKey: eventKeyL3,
+      walletOrigine: wallet,
+      walletBeneficiario: wallet,
+      walletCassa: ROG_CASSA_WALLET,
+      numIngressi: 5,
+      importoTotale: BRIDGE.L3_ROG_SMALL_COSTO,
+      origine: 'URANUS_L3'
+    });
+    if (rogResp && rogResp.success && rogResp.data && rogResp.data.status === 'COMPLETED') {
+      uscitaStatus.rogOk = true;
+      await db.aggiornaUscitaL3(eventKeyL3, {
+        rog: rogResp.data,
+        status: 'PENDING_PAYOUT'
+      });
+    } else {
+      await db.aggiornaUscitaL3(eventKeyL3, {
+        rog: rogResp && rogResp.data ? rogResp.data : { success: false },
+        status: 'PENDING_RECONCILIATION',
+        error: 'ROG_NON_CONFERMATO'
+      });
+    }
   }
 
   // 3. Cascata FIFO → coda background (non blocca la risposta)
@@ -215,11 +272,23 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
        VALUES ('CASSA_L3_ACCANTONATO', $1, $2, 0, $3) RETURNING *`,
       [wallet, nettoFinale, tipoAccount]
     );
+    uscitaStatus.payoutOk = true;
+    await db.aggiornaUscitaL3(eventKeyL3, {
+      nettoInviato: nettoFinale,
+      payout: { tipo: 'CASSA_ACCANTONATO', importo: nettoFinale },
+      status: 'PENDING_PAYOUT'
+    });
   } else {
     console.log(`   🎁 DONO PENDENTE: ${nettoFinale} USDC → ${wallet} (ACCETTA DONO entro 180 giorni)`);
     // event_key legata al turno d'uscita (numeroUscita): impedisce un SECONDO dono per la
     // stessa uscita anche con importo diverso (falla che generò 610 poi 500). Anti-doppio-dono.
-    await giftManager.creaDonoPendente(wallet, nettoFinale, 3, 'PAYOUT_L3', { tipoAccount, deduzioni, numeroUscita: `L3-turno-${numeroTurno}` });
+    const dono = await giftManager.creaDonoPendente(wallet, nettoFinale, 3, 'PAYOUT_L3', { tipoAccount, deduzioni, numeroUscita: `L3-turno-${numeroTurno}` });
+    uscitaStatus.payoutOk = true;
+    await db.aggiornaUscitaL3(eventKeyL3, {
+      nettoInviato: nettoFinale,
+      payout: { tipo: 'DONO_PENDENTE', donoId: dono?.id || null, importo: nettoFinale },
+      status: 'PENDING_PAYOUT'
+    });
   }
 
 
@@ -232,13 +301,15 @@ async function hookUscitaL3(wallet, nome, tipoAccount, nettoOriginale, numeroTur
 
   // ⛓️ Registra on-chain (fire-and-forget)
   chainRegistrar.registerPayout(wallet, nettoFinale, 3, `PAYOUT_L3_${wallet}_${Date.now()}`);
-  if (tipoAccount === 'PRIMARIO' || tipoAccount === 'FONDO') {
+  if (!isSecondario) {
     chainRegistrar.registerBridgeEvent(wallet, 'BRIDGE_ROG_SMALL', BRIDGE.L3_ROG_SMALL_COSTO, 'ROG');
     chainRegistrar.registerBridgeEvent(wallet, 'BRIDGE_PHARAOH', BRIDGE.L3_PHARAOH_COSTO, 'PHARAOH');
-    // 🌐 Cross-platform: notifica ROG e PHARAOH
-    crossPlatform.registraRogSmall(wallet, 5, BRIDGE.L3_ROG_SMALL_COSTO, 'BRIDGE_L3');
     crossPlatform.registraPharaohSuRog(wallet, BRIDGE.L3_PHARAOH_COSTO, 'PHARAOH_BRIDGE_L3');
   }
+  const finalStatus = (uscitaStatus.funzioniOk && uscitaStatus.rogOk && uscitaStatus.nettunoOk && uscitaStatus.pharaohOk && uscitaStatus.payoutOk)
+    ? 'COMPLETED'
+    : (uscitaStatus.rogOk ? 'PENDING_PAYOUT' : 'PENDING_RECONCILIATION');
+  await db.aggiornaUscitaL3(eventKeyL3, { status: finalStatus });
 
   // Aggiungi equivalente USDC al risultato (per il frontend)
   const payoutDisplay = goldConverter.toDisplayObject(nettoFinale, 'USDC');
