@@ -12,15 +12,18 @@
 'use strict';
 
 const crypto = require('crypto');
+const { EventEmitter } = require('events');
 const pg = require('./pg-connection-manager');
 
 // ── CODA IN MEMORIA (+ persistenza PostgreSQL per resilienza) ──
 
 const queue = [];           // Array FIFO di job
 const results = new Map();  // jobId → risultato (in memoria, TTL 10 min)
+const statusEvents = new EventEmitter();
 let processing = false;
 let totalProcessed = 0;
 let totalErrors = 0;
+statusEvents.setMaxListeners(0);
 // ── RETRY automatico su transazioni ancora in pending O turno bloccato ──
 // Copre due casi:
 //   1. TX non ancora confermata su Polygon (RPC lag)
@@ -160,6 +163,45 @@ async function getStatus(jobId) {
   return { jobId, status: 'NOT_FOUND' };
 }
 
+function setJobStatus(jobId, payload) {
+  results.set(jobId, payload);
+  statusEvents.emit(`job:${jobId}`, payload);
+}
+
+function isTerminalStatus(status) {
+  return status === 'COMPLETED' || status === 'FAILED' || status === 'NOT_FOUND';
+}
+
+async function waitForTerminalStatus(jobId, timeoutMs = 45000) {
+  const waitMs = Math.min(300000, Math.max(1000, Number(timeoutMs) || 45000));
+  const current = await getStatus(jobId);
+  if (isTerminalStatus(current.status)) {
+    return { ...current, immediate: true };
+  }
+
+  return await new Promise((resolve) => {
+    const eventName = `job:${jobId}`;
+    const onStatus = (nextStatus) => {
+      if (!isTerminalStatus(nextStatus?.status)) return;
+      clearTimeout(timeoutId);
+      statusEvents.removeListener(eventName, onStatus);
+      resolve(nextStatus);
+    };
+
+    const timeoutId = setTimeout(async () => {
+      statusEvents.removeListener(eventName, onStatus);
+      const latest = await getStatus(jobId);
+      if (isTerminalStatus(latest.status)) {
+        resolve(latest);
+        return;
+      }
+      resolve({ ...latest, status: 'TIMEOUT', waitedMs: waitMs });
+    }, waitMs);
+
+    statusEvents.on(eventName, onStatus);
+  });
+}
+
 // ── WORKER: alternanza solidale (1 coppia per turno, round-robin tra donatori) ──
 
 // Riattiva i donatori soli in attesa quando arriva un nuovo dono: tornano in coda
@@ -182,7 +224,7 @@ function isRetryableErr(err) {
 
 async function markCompleted(job, result) {
   const completed = { jobId: job.id, status: 'COMPLETED', result, processedAt: new Date().toISOString() };
-  results.set(job.id, completed);
+  setJobStatus(job.id, completed);
   totalProcessed++;
   try {
     await pg.query(`UPDATE donation_queue SET status = 'COMPLETED', result = $1, processed_at = NOW() WHERE id = $2`, [JSON.stringify(result), job.id]);
@@ -192,7 +234,7 @@ async function markCompleted(job, result) {
 
 async function markFailed(job, err) {
   const failed = { jobId: job.id, status: 'FAILED', error: err.message, attempts: job.attempts, processedAt: new Date().toISOString() };
-  results.set(job.id, failed);
+  setJobStatus(job.id, failed);
   totalErrors++;
   try {
     await pg.query(`UPDATE donation_queue SET status = 'FAILED', result = $1, processed_at = NOW() WHERE id = $2`, [JSON.stringify({ error: err.message, attempts: job.attempts }), job.id]);
@@ -256,7 +298,7 @@ async function processNext() {
         await markCompleted(job, { success: true, wallet: job.wallet, ticket: r.ticket, numeroCoppie: r.total });
       } else {
         partial = true;
-        results.set(job.id, { jobId: job.id, status: 'PROCESSING', placed: r.placed, total: r.total });
+        setJobStatus(job.id, { jobId: job.id, status: 'PROCESSING', placed: r.placed, total: r.total });
       }
     }
   } catch (err) {
@@ -264,7 +306,7 @@ async function processNext() {
     if (isRetryableErr(err) && job.attempts < MAX_TX_ATTEMPTS) {
       // Non definitivo (tx pending o turno bloccato) → ri-accoda e ritenta.
       requeue = true;
-      results.set(job.id, { jobId: job.id, status: 'PENDING_RETRY', attempt: job.attempts, maxAttempts: MAX_TX_ATTEMPTS, error: err.message });
+      setJobStatus(job.id, { jobId: job.id, status: 'PENDING_RETRY', attempt: job.attempts, maxAttempts: MAX_TX_ATTEMPTS, error: err.message });
       try {
         await pg.query(`UPDATE donation_queue SET status = 'PENDING_RETRY', result = $1 WHERE id = $2`, [JSON.stringify({ attempt: job.attempts, error: err.message }), job.id]);
       } catch (_) {}
@@ -430,6 +472,7 @@ module.exports = {
   initQueueTable,
   enqueue,
   getStatus,
+  waitForTerminalStatus,
   getStats,
   retryFailedTurnoJobs,
   recoverIncompleteJobs,
