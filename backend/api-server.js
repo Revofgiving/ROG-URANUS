@@ -2,6 +2,8 @@
  * 🌀 URANO — API Server
  *
  * POST /api/dona                    — dono 20 USDC → 2 posizioni (HUMAN + CASSA)
+ * GET  /api/dona/await/:jobId       — attesa stato terminale donazione senza polling client
+ * GET  /api/donazioni               — lista paginata donazioni (filtri: wallet, txHash, status)
  * POST /api/inizializza             — bootstrap
  * POST /api/account/registra        — registrazione con contenitore
  * GET  /api/account/:wallet         — info account
@@ -183,7 +185,7 @@ app.post('/api/dona', async (req, res) => {
   }
 });
 
-// Polling stato donazione (frontend chiama ogni 2s)
+// Stato donazione (fallback / diagnostica)
 app.get('/api/dona/status/:jobId', async (req, res) => {
   try {
     const status = await donationQueue.getStatus(req.params.jobId);
@@ -193,9 +195,83 @@ app.get('/api/dona/status/:jobId', async (req, res) => {
   }
 });
 
+// Attesa terminale senza polling client: tiene aperta la richiesta finché il job termina o va in timeout.
+app.get('/api/dona/await/:jobId', async (req, res) => {
+  try {
+    const timeoutMs = Math.min(180000, Math.max(1000, Number(req.query.timeoutMs) || 90000));
+    const status = await donationQueue.waitForTerminalStatus(req.params.jobId, timeoutMs);
+    if (status.status === 'TIMEOUT') {
+      return res.status(202).json({ success: true, ...status });
+    }
+    return res.json({ success: true, ...status });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Statistiche coda (admin)
 app.get('/api/dona/queue-stats', (req, res) => {
   res.json({ success: true, stats: donationQueue.getStats() });
+});
+
+// ── DONAZIONI (query paginata: utile per controllo donazione appena fatta) ──
+app.get('/api/donazioni', async (req, res) => {
+  try {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
+    const offset = (page - 1) * pageSize;
+    const wallet = String(req.query.wallet || '').trim().toLowerCase();
+    const txHash = String(req.query.txHash || '').trim();
+    const status = String(req.query.status || '').trim().toUpperCase();
+
+    const where = [];
+    const params = [];
+
+    if (wallet) {
+      if (!/^0x[a-f0-9]{40}$/.test(wallet)) return res.status(400).json({ error: 'wallet non valido' });
+      params.push(wallet);
+      where.push(`lower(donor_wallet) = $${params.length}`);
+    }
+    if (txHash) {
+      params.push(txHash);
+      where.push(`tx_hash = $${params.length}`);
+    }
+    if (status) {
+      params.push(status);
+      where.push(`upper(status) = $${params.length}`);
+    }
+
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const itemsParams = [...params, pageSize, offset];
+
+    const [donazioni, totalRow] = await Promise.all([
+      pg.queryMany(
+        `SELECT id, donor_wallet, importo, tx_hash, tipo, destinatario_wallet, livello, turno, status, created_at
+         FROM donazioni
+         ${whereClause}
+         ORDER BY created_at DESC
+         LIMIT $${params.length + 1}
+         OFFSET $${params.length + 2}`,
+        itemsParams
+      ),
+      pg.queryOne(`SELECT COUNT(*)::int AS total FROM donazioni ${whereClause}`, params),
+    ]);
+
+    const total = Number(totalRow?.total) || 0;
+    res.json({
+      success: true,
+      donazioni,
+      count: donazioni.length,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── VERIFICA PREREQUISITI ROG (usato dal frontend prima del pagamento) ──
@@ -520,8 +596,10 @@ app.get('/api/doni-pendenti/:wallet', async (req, res) => {
   const wallet = req.params.wallet?.toLowerCase();
   if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet)) return res.status(400).json({ error: 'Wallet non valido' });
   try {
-    const doni = await giftManager.getDoniPendenti(wallet);
-    res.json({ success: true, doni, count: doni.length });
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
+    const data = await giftManager.getDoniPendenti(wallet, { page, pageSize });
+    res.json({ success: true, doni: data.items, count: data.items.length, pagination: data.pagination });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -572,8 +650,10 @@ app.get('/api/doni-storico/:wallet', async (req, res) => {
   const wallet = req.params.wallet?.toLowerCase();
   if (!wallet) return res.status(400).json({ error: 'wallet obbligatorio' });
   try {
-    const storico = await giftManager.getStoricoDoni(wallet);
-    res.json({ success: true, storico, count: storico.length });
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
+    const data = await giftManager.getStoricoDoni(wallet, { page, pageSize });
+    res.json({ success: true, storico: data.items, count: data.items.length, pagination: data.pagination });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -582,9 +662,11 @@ app.get('/api/messaggi/:wallet', async (req, res) => {
   const wallet = req.params.wallet?.toLowerCase();
   if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet)) return res.status(400).json({ error: 'Wallet non valido' });
   try {
-    const messaggi = await giftManager.getMessaggi(wallet);
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize || 20)));
+    const data = await giftManager.getMessaggi(wallet, { page, pageSize });
     const nonLetti = await giftManager.contaNonLetti(wallet);
-    res.json({ success: true, messaggi, nonLetti, count: messaggi.length });
+    res.json({ success: true, messaggi: data.items, nonLetti, count: data.items.length, pagination: data.pagination });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
