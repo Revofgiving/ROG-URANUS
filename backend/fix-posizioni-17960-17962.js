@@ -2,7 +2,7 @@
  * fix-posizioni-17960-17962.js
  * 
  * Corregge le posizioni 17960 e 17962 che sono state assegnate erroneamente
- * a Loretta Pivanti invece che al Nipote Pivanti (beneficiario carta regalo).
+ * a Loretta Pivanti invece che al Nipote Pivanti (beneficiario).
  * 
  * Eseguire con: node fix-posizioni-17960-17962.js [--apply]
  */
@@ -19,7 +19,7 @@ const CORRECT_NAME = 'Nipote Pivanti';
 async function fixPositions() {
   const APPLY = process.argv.includes('--apply');
   
-  console.log('\n🔧 FIX POSIZIONI CARTA REGALO 17960-17962');
+  console.log('\n🔧 FIX POSIZIONI BENEFICIARIO 17960-17962');
   console.log('==========================================');
   console.log(`Modalità: ${APPLY ? '🟢 APPLY (modifica DB)' : '🟡 DRY-RUN (preview)'}`);
   console.log(`\nWallet errato (donor): ${WRONG_WALLET}`);

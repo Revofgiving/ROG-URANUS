@@ -7,7 +7,6 @@ const donationFlowManager = require('./donation-flow-manager');
 const pgConn = require('./pg-connection-manager');
 const { getPolygonProvider } = require('./polygon-provider');
 const pendingDonationStore = require('./pending-donation-store');
-const giftIntentStore = require('./gift-intent-store');
 
 // ========================================
 // CONFIG
@@ -256,7 +255,7 @@ async function handleTransfer({ from, to, value, event }) {
 
 
   // 🎁 CERCA DONAZIONE PENDENTE: Se il frontend ha registrato una donazione
-  // con questo txHash (es. Carta Regalo), usa quei dati (incluso beneficiaryWallet)
+  // con questo txHash, usa quei dati (incluso beneficiaryWallet)
   // Cerchiamo prima per txHash, poi per donor wallet (fallback per race condition)
   let pendingData = pendingDonationStore.findByTxHash(event.transactionHash);
   // Traccia se il match è avvenuto per txHash (esatto, non "stale"): serve per
@@ -287,73 +286,43 @@ async function handleTransfer({ from, to, value, event }) {
     beneficiaryWallet = pendingData.beneficiaryWallet || null;
     beneficiaryName = pendingData.beneficiaryName || null;
     giftMessage = pendingData.giftMessage || null;
-    
-    if (beneficiaryWallet) {
-      console.log(`🎁 CARTA REGALO rilevata! Beneficiario: ${beneficiaryWallet}`);
+
+    if (donationType === 'carta-regalo') {
+      donationType = 'standard';
+      beneficiaryWallet = null;
+      beneficiaryName = null;
+      giftMessage = null;
     }
     if (donationType === 'dono-al-volo') {
       console.log(`🚀 DONO AL VOLO rilevato! Destinatari dalla lista FIFO`);
     }
   } else {
-    // 🎁 RECUPERO DUREVOLE (anti-perdita): prima di deferire, cerchiamo un intento
-    // di carta regalo PERSISTITO su PostgreSQL (gift_intents) ancora privo di
-    // tx_hash, che combaci ESATTAMENTE per (donatore, importo). Copre il caso in
-    // cui il browser è morto dopo il transfer ma prima di comunicare il txHash
-    // reale, e/o il backend è stato riavviato (store in-memory vuoto).
-    let pgIntent = null;
-    try {
-      pgIntent = await giftIntentStore.findPendingByDonorAmount(from, amountUSDC);
-    } catch (e) {
-      console.warn('⚠️  Lookup gift_intents fallito (non bloccante):', e.message || e);
-    }
+    console.log(`⚠️  Nessuna donazione pendente trovata per txHash o wallet.`);
+    console.log(`⏳ DEFER: Attendo registrazione dal frontend...`);
 
-    if (pgIntent && pgIntent.beneficiary_wallet) {
-      const bound = await giftIntentStore.bindTxHash(pgIntent.gift_id, event.transactionHash);
-      console.log(`🎁 Intento regalo DUREVOLE recuperato per (donor, importo): ${pgIntent.gift_id} → ${pgIntent.beneficiary_wallet} (bind tx: ${bound})`);
+    // NON processare subito se non c'è pendingData!
+    // Il frontend potrebbe non aver ancora registrato la donazione.
+    // Aspettiamo che /api/donation/register venga chiamato.
+    // Salviamo solo lo stato per evitare re-detection.
+    state.processedEventIds.push(id);
+    state.lastProcessedBlock = Math.max(state.lastProcessedBlock || 0, Number(event.blockNumber || 0));
+    await saveState(state);
 
-      // Usiamo i dati persistiti per completare il regalo verso il beneficiario
-      // corretto. Impostiamo una pendingData sintetica e proseguiamo (NO defer).
-      pendingData = {
-        donationId: pgIntent.gift_id,
-        donor: from,
-        amountUSDC,
-        txHash: event.transactionHash,
-        donationType: 'carta-regalo',
-        beneficiaryWallet: pgIntent.beneficiary_wallet,
-        giftMessage: pgIntent.gift_message || null
-      };
-      matchedByTxHash = true; // abbiamo legato proprio questa tx all'intento
-      donationType = 'carta-regalo';
-      beneficiaryWallet = pgIntent.beneficiary_wallet;
-      giftMessage = pgIntent.gift_message || null;
-    } else {
-      console.log(`⚠️  Nessuna donazione pendente trovata per txHash o wallet.`);
-      console.log(`⏳ DEFER: Attendo registrazione dal frontend (potrebbe essere carta regalo)...`);
+    // Registra come "pending" così /api/donation/register può trovarlo
+    pendingDonationStore.register(`usdc_${id}`, {
+      donationId: `usdc_${id}`,
+      donor: from,
+      amountUSDC,
+      txHash: event.transactionHash,
+      status: 'USDC_RECEIVED_AWAITING_FRONTEND',
+      usdcReceivedAt: timestampIso,
+      blockNumber: event.blockNumber,
+      donationType: 'unknown' // Sarà aggiornato dal frontend
+    });
 
-      // 🎁 FIX CARTA REGALO: NON processare subito se non c'è pendingData!
-      // Il frontend potrebbe non aver ancora registrato la donazione.
-      // Aspettiamo che /api/donation/register venga chiamato.
-      // Salviamo solo lo stato per evitare re-detection.
-      state.processedEventIds.push(id);
-      state.lastProcessedBlock = Math.max(state.lastProcessedBlock || 0, Number(event.blockNumber || 0));
-      await saveState(state);
-
-      // Registra come "pending" così /api/donation/register può trovarlo
-      pendingDonationStore.register(`usdc_${id}`, {
-        donationId: `usdc_${id}`,
-        donor: from,
-        amountUSDC,
-        txHash: event.transactionHash,
-        status: 'USDC_RECEIVED_AWAITING_FRONTEND',
-        usdcReceivedAt: timestampIso,
-        blockNumber: event.blockNumber,
-        donationType: 'unknown' // Sarà aggiornato dal frontend
-      });
-
-      console.log(`✅ Transfer USDC salvato come USDC_RECEIVED_AWAITING_FRONTEND`);
-      console.log(`   Il frontend dovrà chiamare /api/donation/register per completare.`);
-      return { success: true, id, deferred: true, reason: 'waiting_for_frontend_registration' };
-    }
+    console.log(`✅ Transfer USDC salvato come USDC_RECEIVED_AWAITING_FRONTEND`);
+    console.log(`   Il frontend dovrà chiamare /api/donation/register per completare.`);
+    return { success: true, id, deferred: true, reason: 'waiting_for_frontend_registration' };
   }
 
   // 🔬 MODALITÀ FORENSE: Verifichiamo on-chain e creiamo posizioni
@@ -368,20 +337,7 @@ async function handleTransfer({ from, to, value, event }) {
   const isNumericId = /^\d+$/.test(String(donationIdToUse));
   const isTemporaryId = !isNumericId;
   
-  // 🎁 RECUPERO ROBUSTO CARTA REGALO:
-  // Se abbiamo i dati COMPLETI del regalo e il match è esatto per txHash (quindi
-  // NON un'entry "stale" trovata per donor), completiamo SUBITO dal listener
-  // invece di deferire. Così le posizioni del beneficiario vengono create anche
-  // se il frontend non chiama /api/donation/verify (es. pagina chiusa dopo il
-  // transfer). L'idempotenza per txHash (getProcessedDonation + mutex per-txHash
-  // in processDonation) evita qualsiasi doppia creazione se anche /verify dovesse
-  // processare la stessa transazione.
-  const isGiftReadyFromListener =
-    matchedByTxHash &&
-    (pendingData.donationType === 'carta-regalo') &&
-    !!pendingData.beneficiaryWallet;
-
-  if (isTemporaryId && pendingData && !isGiftReadyFromListener) {
+  if (isTemporaryId && pendingData) {
     console.log('⏳ DonationId non-numerico rilevato - DEFER processing');
     console.log(`   ID: ${donationIdToUse} (tipo: ${pendingData.donationType || 'unknown'})`);
     console.log('   Attendo che frontend completi il flusso via /api/donation/verify...');
@@ -403,11 +359,6 @@ async function handleTransfer({ from, to, value, event }) {
     return { success: true, id, deferred: true, reason: 'waiting_for_numeric_donationId' };
   }
 
-  if (isTemporaryId && isGiftReadyFromListener) {
-    console.log('🎁 Carta regalo con dati completi (match txHash): completamento dal listener (recupero robusto).');
-    console.log(`   Beneficiario: ${pendingData.beneficiaryWallet}`);
-  }
-  
   const donationResult = await donationFlowManager.processDonation({
     donationId: donationIdToUse,
     donor: from,
@@ -415,7 +366,7 @@ async function handleTransfer({ from, to, value, event }) {
     txHash: event.transactionHash,
     timestamp: timestampIso,
     donationType,
-    // Dati opzionali per Carta Regalo (recuperati dal pending store)
+    // Dati opzionali recuperati dal pending store
     beneficiaryWallet,
     beneficiaryName,
     giftMessage

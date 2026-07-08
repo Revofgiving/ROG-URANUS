@@ -60,7 +60,6 @@ const galleryAPI = require('./gallery-api-local');
 const maintenanceManager = require('./maintenance-manager');
 const reportGenerator = require('./src/26-pannello-controllo/report-generator');
 const pendingDonationStore = require('./pending-donation-store');
-const giftIntentStore = require('./gift-intent-store');
 
 // In modalità PostgreSQL-only non usiamo più SQLite a runtime.
 // Se manca DATABASE_URL, consideriamo la configurazione non valida.
@@ -2190,27 +2189,11 @@ const { donationId, donor, amount, txHash, beneficiaryWallet, beneficiaryName, g
     const id = String(donationId);
     const isNumericId = /^\d+$/.test(id);
 
-    // 🎁 PERSISTENZA DUREVOLE CARTA REGALO (anti-perdita):
-    // Salviamo SUBITO l'intento del regalo su PostgreSQL (gift_intents), così il
-    // legame donatore→beneficiario sopravvive a riavvii del backend e alla
-    // chiusura del browser. Il gift-reconciler completerà il regalo anche se
-    // /api/donation/verify non venisse mai chiamato. Vale sia per la
-    // pre-registrazione (txHash 'pending') sia post-transfer (txHash reale).
-    // Best-effort: NON blocca la registrazione se fallisce.
-    if (String(donationType || '').toLowerCase() === 'carta-regalo' && beneficiaryWallet) {
-      try {
-        await giftIntentStore.upsertIntent({
-          giftId: id,
-          donor,
-          beneficiaryWallet,
-          amountUSDC: amountNumber,
-          giftMessage,
-          txHash
-        });
-      } catch (giftErr) {
-        console.warn('⚠️  Persistenza gift_intents fallita (non bloccante):', giftErr.message || giftErr);
-      }
-    }
+    const rawDonationType = String(donationType || '').toLowerCase();
+    const normalizedDonationType = rawDonationType === 'carta-regalo' ? 'standard' : (rawDonationType || 'standard');
+    const normalizedBeneficiaryWallet = rawDonationType === 'carta-regalo' ? null : beneficiaryWallet;
+    const normalizedBeneficiaryName = rawDonationType === 'carta-regalo' ? null : beneficiaryName;
+    const normalizedGiftMessage = rawDonationType === 'carta-regalo' ? null : giftMessage;
     
     // 🔄 FIX RACE CONDITION: Se riceviamo un ID numerico (da registerDonation()),
     // cerchiamo se esiste già una donazione pendente per questo donor/txHash
@@ -2224,7 +2207,7 @@ const { donationId, donor, amount, txHash, beneficiaryWallet, beneficiaryName, g
       
       const existing = existingByTx || existingByDonor;
       
-      // 🎁 FIX CARTA REGALO: Gestisce sia ID temporanei (pending_) che USDC ricevuti dal listener (usdc_)
+      // Gestisce sia ID temporanei (pending_) che USDC ricevuti dal listener (usdc_)
       const isUpgradableId = existing && (
         String(existing.donationId).startsWith('pending_') ||
         String(existing.donationId).startsWith('usdc_') ||
@@ -2236,8 +2219,8 @@ const { donationId, donor, amount, txHash, beneficiaryWallet, beneficiaryName, g
         console.log(`   ID precedente: ${existing.donationId}`);
         console.log(`   ID numerico: ${id}`);
         console.log(`   Stato attuale: ${existing.status}`);
-        if (beneficiaryWallet) {
-          console.log(`   🎁 CARTA REGALO - Beneficiario: ${beneficiaryWallet}`);
+        if (normalizedBeneficiaryWallet) {
+          console.log(`   Beneficiario: ${normalizedBeneficiaryWallet}`);
         }
         
         // Rimuovi vecchia entry con ID temporaneo/usdc
@@ -2256,14 +2239,14 @@ const { donationId, donor, amount, txHash, beneficiaryWallet, beneficiaryName, g
           numericDonationId: id,
           txHash: txHash,
           status: newStatus,
-          donationType: (donationType || existing.donationType || 'standard').toLowerCase(),
-          beneficiaryWallet: beneficiaryWallet || existing.beneficiaryWallet || null,
-          beneficiaryName: beneficiaryName || existing.beneficiaryName || null,
-          giftMessage: giftMessage || existing.giftMessage || null,
+          donationType: (normalizedDonationType || existing.donationType || 'standard').toLowerCase(),
+          beneficiaryWallet: normalizedBeneficiaryWallet || existing.beneficiaryWallet || null,
+          beneficiaryName: normalizedBeneficiaryName || existing.beneficiaryName || null,
+          giftMessage: normalizedGiftMessage || existing.giftMessage || null,
           upgradedAt: new Date().toISOString()
         });
         
-        console.log(`✅ Donazione aggiornata: status=${newStatus}, beneficiary=${beneficiaryWallet || 'N/A'}`);
+        console.log(`✅ Donazione aggiornata: status=${newStatus}, beneficiary=${normalizedBeneficiaryWallet || 'N/A'}`);
         
         return res.json({
           success: true,
@@ -2282,12 +2265,11 @@ const { donationId, donor, amount, txHash, beneficiaryWallet, beneficiaryName, g
       amountUSDC: amountNumber,
       txHash,
       status: 'VERIFYING',
-      // Tipo di donazione: standard | carta-regalo | dono-al-volo
-      donationType: (donationType || 'standard').toLowerCase(),
-      // Campi opzionali per Carta Regalo
-      beneficiaryWallet: beneficiaryWallet || null,
-      beneficiaryName: beneficiaryName || null,
-      giftMessage: giftMessage || null
+      // Tipo di donazione: standard | dono-al-volo | rientro | manual-transfer
+      donationType: normalizedDonationType,
+      beneficiaryWallet: normalizedBeneficiaryWallet || null,
+      beneficiaryName: normalizedBeneficiaryName || null,
+      giftMessage: normalizedGiftMessage || null
     });
 
     console.log('\n📥 DONAZIONE REGISTRATA (API)');
@@ -2369,7 +2351,7 @@ app.post('/api/donation/verify', async (req, res) => {
     // La ZK-KYC va applicata prima di ricevere il primo dono "LARGE" (distribuzioni > soglia),
     // quindi verrà verificata nella pipeline di distribuzione, non qui.
 
-    // Usa donation-flow-manager per creare posizioni (donazione diretta, Carta Regalo o Dono al volo).
+    // Usa donation-flow-manager per creare posizioni (donazione diretta o Dono al volo).
     const donationResult = await donationFlowManager.processDonation({
       donationId: id,
       donor: pending.donor,
@@ -2377,7 +2359,7 @@ app.post('/api/donation/verify', async (req, res) => {
       txHash: pending.txHash,
       timestamp: pending.registeredAt,
       donationType: pending.donationType || 'standard',
-      // Dati opzionali per Carta Regalo, se presenti
+      // Dati opzionali dal pending store, se presenti
       beneficiaryWallet: pending.beneficiaryWallet,
       beneficiaryName: pending.beneficiaryName,
       giftMessage: pending.giftMessage

@@ -100,7 +100,7 @@ async function processDonation(donation) {
       txHash,
       timestamp: donation.createdAt,
       donationType: donationType || 'standard',
-      // Dati opzionali Carta Regalo
+      // Dati opzionali dal pending store
       beneficiaryWallet: donation.beneficiaryWallet,
       beneficiaryName: donation.beneficiaryName,
       giftMessage: donation.giftMessage

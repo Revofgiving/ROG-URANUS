@@ -144,35 +144,6 @@ async function ensureCoreSchema() {
     CREATE INDEX IF NOT EXISTS idx_dono_al_volo_queue_wallet
       ON dono_al_volo_queue (LOWER(wallet_address));
 
-    -- 🎁 INTENTI CARTA REGALO (durevoli, anti-perdita)
-    -- Registriamo l'intento del regalo (donatore, beneficiario, importo) in modo
-    -- PERSISTENTE prima/durante il pagamento, così il legame col beneficiario
-    -- sopravvive a riavvii del backend e alla chiusura del browser.
-    -- Il gift-reconciler completa gli intenti PENDING con tx_hash reale.
-    CREATE TABLE IF NOT EXISTS gift_intents (
-      id BIGSERIAL PRIMARY KEY,
-      gift_id TEXT NOT NULL UNIQUE,
-      donor_wallet TEXT NOT NULL,
-      beneficiary_wallet TEXT NOT NULL,
-      amount_usdc NUMERIC(18, 6) NOT NULL,
-      gift_message TEXT,
-      tx_hash TEXT,
-      status TEXT NOT NULL DEFAULT 'PENDING',
-      attempts INTEGER NOT NULL DEFAULT 0,
-      last_error TEXT,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      completed_at TIMESTAMPTZ
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_gift_intents_status
-      ON gift_intents (status);
-
-    CREATE INDEX IF NOT EXISTS idx_gift_intents_donor
-      ON gift_intents (LOWER(donor_wallet));
-
-    CREATE INDEX IF NOT EXISTS idx_gift_intents_tx
-      ON gift_intents (LOWER(tx_hash));
 
     -- Bridge URANUS → ROG (idempotenza event_key)
     CREATE TABLE IF NOT EXISTS uranus_bridge_events (

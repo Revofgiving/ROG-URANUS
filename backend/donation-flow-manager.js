@@ -301,7 +301,6 @@ async function processDonation(donationData) {
     donationType = 'standard',
     source,
     eventKey,
-    // Opzionali per Carta Regalo
     beneficiaryWallet: rawBeneficiary,
     beneficiaryName,
     giftMessage
@@ -309,7 +308,17 @@ async function processDonation(donationData) {
 
   // 🚨 NORMALIZZAZIONE WALLET: Tutti i wallet devono essere lowercase!
   const donor = (rawDonor || '').toLowerCase();
-  const beneficiaryWallet = rawBeneficiary ? rawBeneficiary.toLowerCase() : null;
+  let beneficiaryWallet = rawBeneficiary ? rawBeneficiary.toLowerCase() : null;
+  let safeDonationType = (donationType || 'standard').toLowerCase();
+  let safeBeneficiaryName = beneficiaryName || null;
+  let safeGiftMessage = giftMessage || null;
+
+  if (safeDonationType === 'carta-regalo') {
+    safeDonationType = 'standard';
+    beneficiaryWallet = null;
+    safeBeneficiaryName = null;
+    safeGiftMessage = null;
+  }
 
   // Vincolo ROG: solo donazioni in USDC interi e PARI (multipli di 2).
   const amountUSDCNum = Number(amountUSDC);
@@ -331,7 +340,7 @@ async function processDonation(donationData) {
       donor,
       amountUSDC,
       timestamp,
-      donationType,
+      donationType: safeDonationType,
       beneficiaryWallet: null,
       positionsCreated: 0,
       firstPosition: null,
@@ -356,7 +365,6 @@ async function processDonation(donationData) {
   // Tipo di donazione normalizzato (il fix localStorage stale è già gestito nel frontend:
   // donation.html rimuove rog_donation_data subito dopo la lettura e resetta
   // donationType a 'standard' quando l'utente seleziona manualmente un importo).
-  let safeDonationType = (donationType || 'standard').toLowerCase();
 
   // Ramificazione: Dono al volo ha un flusso dedicato
   if (safeDonationType === 'dono-al-volo') {
@@ -473,15 +481,19 @@ async function processDonation(donationData) {
     // Rientro esplicito = autoinvito forzato (invitante = invitato = donor)
     const forceRientro = donationTypeLower === 'rientro';
 
-    const recipientWallet = forceRientro ? donor : (beneficiaryWallet || donor);
-    const recipientName = beneficiaryName || await getDonorName(recipientWallet);
+    let recipientWallet = forceRientro ? donor : (beneficiaryWallet || donor);
+    let recipientName = safeBeneficiaryName || await getDonorName(recipientWallet);
+    if (safeDonationType === 'standard') {
+      recipientWallet = donor;
+      recipientName = donorName;
+    }
     const isGift = !forceRientro && recipientWallet.toLowerCase() !== donor.toLowerCase();
     
     console.log(`📝 Nome donor: ${donorName}`);
-    console.log(`🎁 Tipo: ${isGift ? 'CARTA REGALO' : 'DONAZIONE DIRETTA'}`);
+    console.log(`🎁 Tipo: ${isGift ? 'DONAZIONE CON BENEFICIARIO' : 'DONAZIONE DIRETTA'}`);
     console.log(`👤 Beneficiario posizioni: ${recipientName} (${recipientWallet})\n`);
     
-    // 🎁 CARTA REGALO: Auto-registra il beneficiario nella community se non lo è
+    // 🎁 Auto-registra il beneficiario nella community se non lo è
     // Il donor (chi paga) deve essere registrato, ma il beneficiario può non esserlo
     if (isGift && recipientWallet) {
       try {
@@ -593,15 +605,15 @@ async function processDonation(donationData) {
         const H = humanPositions.length;
 
         // REGOLA ROG CORRETTA:
-        // - CARTA REGALO (qualsiasi H): invitante = DONOR (chi regala)
+        // - DONAZIONE CON BENEFICIARIO (qualsiasi H): invitante = DONOR (chi paga)
         // - RIENTRO (wallet già nel sistema): invitante = SELF + distribuzione AVENGERS/ROG
         // - PRIMA DONAZIONE: invitante = referral diretto o ROG + distribuzione AVENGERS/ROG
         
         let mapping;
         
         if (isGift) {
-          // CARTA REGALO: l'invitante è SEMPRE il donor (chi fa il regalo)
-          console.log(`🎁 Carta Regalo: invitante = ${donorName} (donor)`);
+          // Donazione con beneficiario: l'invitante è SEMPRE il donor (chi paga)
+          console.log(`🎁 Donazione con beneficiario: invitante = ${donorName} (donor)`);
           mapping = calcolaInvitiReferralPerDonazione(
             humanPositions,
             donor,
@@ -638,7 +650,7 @@ async function processDonation(donationData) {
             await referralManager.reload();
           } catch (reloadErr) {
             console.error(
-              '⚠️  Errore reload ReferralManager dopo aggiornamento inviti (donazione standard/carta-regalo/rientro):',
+              '⚠️  Errore reload ReferralManager dopo aggiornamento inviti (donazione standard/rientro):',
               reloadErr.message || reloadErr
             );
           }
@@ -648,7 +660,7 @@ async function processDonation(donationData) {
       console.error('⚠️  Errore registrazione invitati (PostgreSQL) per donazione:', e.message || e);
     }
     
-    // Se è una Carta Regalo, registra invito (donor → beneficiario)
+    // Se ha beneficiario, registra invito (donor → beneficiario)
     if (isGift) {
       try {
         await referralManager.registraInvito({
@@ -657,7 +669,7 @@ async function processDonation(donationData) {
           nomeInvitante: donorName
         });
       } catch (invitoError) {
-        console.error('⚠️  Errore registrazione invito per Carta Regalo:', invitoError.message);
+        console.error('⚠️  Errore registrazione invito per donazione con beneficiario:', invitoError.message);
       }
     }
     
@@ -684,11 +696,11 @@ async function processDonation(donationData) {
       status: 'COMPLETED',
       donationType: donationTypeLower,
 
-      // Info Carta Regalo (se applicabile)
+      // Info beneficiario (se applicabile)
       beneficiaryWallet: recipientWallet,
       beneficiaryName: recipientName,
       isGift,
-      giftMessage: giftMessage || null
+      giftMessage: safeGiftMessage || null
     };
     
     // 7. TODO: Salva record donazione in database

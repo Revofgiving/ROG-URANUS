@@ -271,10 +271,10 @@ class DonationQueueManager {
       throw new Error('txHash, donor e amountUSDC sono obbligatori');
     }
 
-    // Auto-priority: Carte Regalo = URGENT, Dono al volo = HIGH, resto = NORMAL
+    const normalizedDonationType = donationType === 'carta-regalo' ? 'standard' : donationType;
+    // Auto-priority: Dono al volo = HIGH, resto = NORMAL
     const finalPriority = priority || (
-      donationType === 'carta-regalo' ? PRIORITY.URGENT :
-      donationType === 'dono-al-volo' ? PRIORITY.HIGH :
+      normalizedDonationType === 'dono-al-volo' ? PRIORITY.HIGH :
       PRIORITY.NORMAL
     );
 
@@ -286,7 +286,7 @@ class DonationQueueManager {
       logIndex,
       donor.toLowerCase(),
       amountUSDC,
-      donationType,
+      normalizedDonationType,
       beneficiaryWallet?.toLowerCase(),
       beneficiaryName,
       giftMessage,

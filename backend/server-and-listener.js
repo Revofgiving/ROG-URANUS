@@ -70,9 +70,6 @@ async function startServer() {
     // 6. Avvia worker coda donazioni (NUOVO - Scalabilità 600+ donazioni/min)
     startDonationWorker();
     
-    // 7. Avvia gift-reconciler (rete di sicurezza anti-perdita Carte Regalo)
-    startGiftReconciler();
-    
     console.log('\n✅ ROG Backend completamente avviato\n');
     
   } catch (error) {
@@ -207,18 +204,6 @@ function startDonationWorker() {
   console.log('✅ Donation queue worker avviato');
 }
 
-// ========================================
-// GIFT RECONCILER (ANTI-PERDITA CARTE REGALO)
-// ========================================
-
-function startGiftReconciler() {
-  try {
-    const giftReconciler = require('./gift-reconciler');
-    giftReconciler.start();
-  } catch (err) {
-    console.warn('⚠️  Gift reconciler non avviato (non bloccante):', err.message || err);
-  }
-}
 
 // ========================================
 // AVVIA SERVER
