@@ -1,25 +1,38 @@
 {
-  "name": "urano-backend",
+  "name": "rog-messaging-backend",
   "version": "1.0.0",
-  "description": "Backend URANO v2 — 20 USDC → 2 posizioni (HUMAN + CASSA_ROG) → 1.000 netti",
-  "main": "api-server.js",
+  "description": "Backend per sistema di messaggistica ROG",
+  "main": "server-and-listener.js",
   "scripts": {
-    "start": "node api-server.js",
-    "dev": "node --watch api-server.js",
-    "init-db": "node -e \"require('./db-manager').initDatabase().then(() => process.exit(0))\""
+    "start": "node server-and-listener.js",
+    "dev": "nodemon server-and-listener.js",
+    "build": "echo 'No build step required'",
+    "process:usdc:txs": "node process-usdc-txs.js"
   },
+  "keywords": [
+    "rog",
+    "messaging",
+    "backend",
+    "bot"
+  ],
+  "author": "ROG Team",
+  "license": "MIT",
   "dependencies": {
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
+    "dotenv": "^16.6.1",
     "ethers": "^5.7.2",
-    "express": "^4.21.0",
-    "express-rate-limit": "^8.5.2",
-    "helmet": "^8.2.0",
-    "pg": "^8.13.0",
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1",
+    "node-cache": "^5.1.2",
+    "node-fetch": "^2.7.0",
+    "nodemailer": "^7.0.11",
+    "pdfkit": "^0.18.0",
+    "pg": "^8.21.0",
     "prom-client": "^14.2.0",
-    "uuid": "^14.0.0"
+    "sqlite3": "^5.1.7",
+    "uuid": "^9.0.1"
   },
-  "engines": {
-    "node": ">=18.0.0"
+  "devDependencies": {
+    "nodemon": "^3.1.11"
   }
 }

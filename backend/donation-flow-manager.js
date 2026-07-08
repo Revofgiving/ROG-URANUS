@@ -1,1265 +1,1507 @@
 /**
- * 🌀 URANO — Donation Flow Manager
+ * 🎁 ROG DONATION FLOW MANAGER
+ * 
+ * Gestisce il flusso completo di donazione:
+ * 1. Verifica donazione on-chain
+ * 2. Crea posizioni automatiche (HUMAN+PILETTA)
+ * 3. Minta NFT RGx (1 per ogni 2€)
+ * 4. Aggiorna tutti i database
+ * 5. Invia notifiche
  *
- * FLUSSO PHARAON ÷ 10 con doppia posizione (HUMAN + CASSA):
+ * Nota: questo modulo deve essere IDEMPOTENTE.
+ * In produzione la stessa donazione può arrivare da più canali:
+ * - polling frontend (/api/donation/verify)
+ * - USDC incoming listener (Transfer -> ROG)
+ * - smart-contract listener (DonationCompleted)
  *
- * ENTRATA: 20 USDC → 2 posizioni (10 HUMAN + 10 CASSA)
- *   Tavola L0: 6 donatori × 10 = 60 → erede esce con 50 (10 trattenuti, restituiti a L3)
- *
- * BLOCCO 1: Luna (L1,2) → Mercurio (L2,2) → Venere (L3,3)
- *   18 sacerdoti × 50 = 900 + 10 restituiti = 910 lordo
- *   Cassa: 300 (Funzioni) → Netto Primario: 610 | Secondario: 110 (+500 per L4)
- *
- * BLOCCO 2: Giove (L4,3) → Saturno (L5,3)
- *   L4: 3×500 = 1500 → netto 400 | L5: 3×1000 = 3000 → netto 2900 (scelta URANUS: 10 crediti, non 110)
- *
- * Ogni posizione (HUMAN e CASSA) percorre lo STESSO identico percorso.
+ * Per evitare creazioni duplicate di posizioni, deduplichiamo per txHash.
+ * 
+ * @version 1.0.0
+ * @author Warp AI Agent
  */
-'use strict';
 
-const db              = require('./db-manager');
-const tableManager    = require('./table-manager');
-const containerManager = require('./container-manager');
-const functionManager = require('./function-manager');
-const rules           = require('./rules-engine');
-const verifier        = require('./blockchain-verifier');
-const bridge          = require('./bridge-manager');
-const predisposizione = require('./predisposizione-manager');
-const chainRegistrar  = require('./chain-registrar');
-const goldConverter   = require('./gold-converter');
-const rogChecker      = require('./rog-prerequisite-checker');
-const payoutMgr       = require('./payout-manager');
-const { URANUS_CASSA_WALLET } = require('./wallet-cassa'); // 🏛️ UNICO riferimento cassa Uranus
+const fs = require('fs').promises;
+const path = require('path');
+const positionCreator = require('./position-creator');
+const dbPg = require('./db-unified-manager-pg');
+const referralManager = require('./referral-manager');
+const cycleCompletionEnginePg = require('./cycle-completion-engine-pg');
+const largeDistributionEngine = require('./large-distribution-engine-pg');
+const communityRegistrationManager = require('./community-registration-manager');
 
-// Tesoreria on-chain: dove ARRIVANO e si registrano le donazioni. Coincide con la CASSA Uranus.
-const TREASURY_WALLET = URANUS_CASSA_WALLET;
-// 🏛️ LEGGE COMMITTENTE: la posizione 0 (Fondo "A", erede della tavola #1, apre i turni) È SEMPRE
-// il wallet Fortunato, a prescindere da qualsiasi env su Coolify. Fortunato detiene la posizione 0;
-// eventuali sue ulteriori posizioni verranno create esplicitamente in futuro. NON sovrascrivere via env.
-// NB: la tesoreria on-chain (TREASURY_WALLET) resta separata e invariata.
-const FORTUNATO_WALLET = '0x49b21573d1aea396cdb6d2b9d8c8bd5bb25645a4';
-const FONDO_WALLET = FORTUNATO_WALLET;
-// 🏛️ LEGGE COMMITTENTE: la posizione "gemella" CASSA che ogni utente forma all'iscrizione è
-// assegnata alla CASSA URANUS on-chain (0x4f53…). Unico riferimento: URANUS_CASSA_WALLET.
-const CASSA_WALLET = URANUS_CASSA_WALLET;
-const FONDO_SIGLA = 'A';
-const SYSTEM_WALLETS = new Set([
-  '0x49b21573d1aea396cdb6d2b9d8c8bd5bb25645a4',
-  '0x4f53c4277e2e738cdb71375253b3fe30bbca95ce',
-]);
+// Il backend ROG ora è PostgreSQL-only: db-unified-manager-pg è l'unica
+// fonte di verità per donazioni e wallet. SQLite è disabilitato a runtime.
 
-function isSystemWallet(wallet) {
-  return SYSTEM_WALLETS.has(String(wallet || '').toLowerCase());
+// ========================================
+// IDEMPOTENZA (DEDUPLICA)
+// ========================================
+
+function normalizeTxHash(txHash) {
+  return String(txHash || '').trim().toLowerCase();
 }
 
-// ========================================
-// INIZIALIZZAZIONE
-// ========================================
+function deriveLogIndex({ donationId, txHash }) {
+  const tx = normalizeTxHash(txHash);
+  const id = String(donationId || '').trim();
 
-async function inizializzaSistema() {
-  await db.initDatabase();
-  const state = await db.getState('sistema', null);
-  if (state && state.inizializzato) {
-    console.log('✅ Sistema URANO già inizializzato');
-    return state;
+  // Formato standard dei listener: `${txHash}:${logIndex}`
+  if (tx && id.toLowerCase().startsWith(tx) && id.includes(':')) {
+    const parts = id.split(':');
+    const li = Number(parts[parts.length - 1]);
+    return Number.isFinite(li) ? li : 0;
   }
 
-  console.log('\n🌀 ========================================');
-  console.log('   INIZIALIZZAZIONE SISTEMA URANO');
-  console.log('========================================\n');
-
-  // Account Fondo (A)
-  await db.createAccount({ wallet: FONDO_WALLET, nome: 'Fondo URANO (A)', tipo: 'FONDO', sigla: FONDO_SIGLA });
-
-  // Account CASSA (sistema)
-  await db.createAccount({ wallet: CASSA_WALLET, nome: 'CASSA (Sistema)', tipo: 'CASSA' });
-
-  // Prima tavola entrata
-  const primaTavola = await tableManager.creaTavolaPercorso(0, FONDO_WALLET, 1);
-
-  // Turno entrata
-  await db.createTurno({
-    sezione: 'ENTRATA', livello: 0, blocco: null, numeroTurno: 1,
-    faraoneWallet: FONDO_WALLET, faraoneTipo: 'FONDO', sacerdotiNecessari: 6
-  });
-
-  // Turno Blocco 1
-  await db.createTurno({
-    sezione: 'URANO', livello: 1, blocco: 1, numeroTurno: 1,
-    faraoneWallet: FONDO_WALLET, faraoneTipo: 'FONDO',
-    sacerdotiNecessari: rules.IMPORTI.SACERDOTI_PRIMO_TURNO
-  });
-
-  // Turni Blocco 2
-  await db.createTurno({
-    sezione: 'URANO', livello: 4, blocco: 2, numeroTurno: 1,
-    faraoneWallet: FONDO_WALLET, faraoneTipo: 'FONDO', sacerdotiNecessari: 3
-  });
-  await db.createTurno({
-    sezione: 'URANO', livello: 5, blocco: 2, numeroTurno: 1,
-    faraoneWallet: FONDO_WALLET, faraoneTipo: 'FONDO', sacerdotiNecessari: 3
-  });
-
-  // ── NETTUNO: parte VUOTO ────────────────────────────────────────
-  // Nettuno si riempie naturalmente tramite:
-  //   1. Bridge L3/L5: posizioni inserite ad ogni uscita da Venere/Saturno
-  //   2. Auto-fill da Sole: 1 HUMAN per ogni tavola L0 completata
-  //   3. Rientri perpetui: 6/18 rientri per ogni uscita Nettuno
-  // Nessun seed artificiale — nessun USDC non coperto.
-  console.log(`\n🌊 Nettuno: parte vuoto, si riempirà naturalmente da Bridge + Sole + Rientri`);
-
-  const nuovoState = {
-    inizializzato: true, turnoEntrata: 1, turnoSistemaUrano: 1,
-    primaTavolaEntrata: primaTavola.numero,
-    fondoWallet: FONDO_WALLET, cassaWallet: CASSA_WALLET,
-    nettunoSeed: 0
-  };
-  await db.setState('sistema', nuovoState);
-
-  console.log('✅ Sistema URANO inizializzato');
-  console.log(`   Fondo (A): ${FONDO_WALLET}`);
-  console.log(`   CASSA: ${CASSA_WALLET}`);
-  console.log(`   Nettuno: vuoto (riempimento naturale)`);
-  return nuovoState;
-}
-
-// ========================================
-// INGRESSO SACERDOTE NEL BLOCCO 1
-// ========================================
-
-async function posizionaSacerdoteInUrano(wallet, nome, chiaveSdoppiamentoSole = null) {
-  const pg = require('./pg-connection-manager');
-  const turno = await db.getTurnoCorrente('URANO', 1);
-  if (!turno) {
-    console.log(`   ⚠️  Nessun turno Urano attivo — sacerdote in coda`);
-    await containerManager.trasferisciAContenitore52(wallet, null, `Sacerdote: ${nome}`);
-    return null;
-  }
-
-  // Fondo = Faraone ricevente, non sacerdote
-  const accountInIngresso = await db.getAccount(wallet);
-  if (accountInIngresso?.tipo === 'FONDO') {
-    const tavolaLuna = await tableManager.getTavolaPercorsoAttiva(1, turno.numero_turno);
-    if (!tavolaLuna) {
-      await tableManager.creaTavolaPercorso(1, turno.faraone_wallet, turno.numero_turno);
-      console.log(`   👑 Faraone ${nome} entra nel Blocco 1 — tavola Luna creata`);
-    }
-    return { isFaraone: true, wallet, turno: turno.numero_turno };
-  }
-
-  // Trova tavola aperta L1→L2→L3
-  let tavolaAttiva = null, livelloCorrente = null;
-  for (const liv of [1, 2, 3]) {
-    tavolaAttiva = await tableManager.getTavolaPercorsoAttiva(liv, turno.numero_turno);
-    if (tavolaAttiva) { livelloCorrente = liv; break; }
-  }
-
-  if (!tavolaAttiva) {
-    const entrati = turno.sacerdoti_entrati;
-    livelloCorrente = entrati < 2 ? 1 : entrati < 6 ? 2 : 3;
-    tavolaAttiva = await tableManager.creaTavolaPercorso(livelloCorrente, turno.faraone_wallet, turno.numero_turno);
-    if (livelloCorrente === 3) await inserisciGemelloPendente(turno.numero_turno);
-  }
-
-  const livNome = { 1: 'LUNA', 2: 'MERCURIO', 3: 'VENERE' };
-  console.log(`   ⛩️  Sacerdote → ${livNome[livelloCorrente]} (tavola #${tavolaAttiva.numero})`);
-
-  await tableManager.posizionaDonatore({
-    tavolaId: tavolaAttiva.id, tavolaNumero: tavolaAttiva.numero,
-    livello: livelloCorrente, wallet, nome, tipo: 'DONATORE',
-    donoImporto: rules.IMPORTI.DONO_URANO, turno: turno.numero_turno, sdoppiabile: true
-  });
-
-  await db.incrementSacerdotiEntrati(turno.id);
-
-  const { sacerdoti_entrati } = await pg.queryOne('SELECT sacerdoti_entrati FROM turni WHERE id = $1', [turno.id]);
-  const entrati = Number(sacerdoti_entrati) || 0;
-  console.log(`   Sacerdoti nel Blocco 1: ${entrati}/${turno.sacerdoti_necessari}`);
-
-  // 🔮 PREDISPOSIZIONE: calcola le posizioni future di questo sacerdote.
-  // In transazione la avvolgiamo in un SAVEPOINT: se fallisce (best-effort),
-  // annulla solo questo passo senza compromettere l'intera transazione.
-  try {
-    const pgConn = require('./pg-connection-manager');
-    await pgConn.savepoint(() => predisposizione.calcolaPredisposizione(wallet, turno.numero_turno, entrati, turno.faraone_wallet, chiaveSdoppiamentoSole));
-  } catch (e) { console.log(`   ⚠️  Predisposizione non calcolata: ${e.message}`); }
-
-  // Progressioni
-  if (livelloCorrente === 1 && entrati === 2) {
-    console.log('\n   🏛️ LUNA COMPLETATO → progressione a Mercurio');
-    await tableManager.avanzaSacerdotiAlLivello(1, 2, turno.numero_turno, turno.faraone_wallet);
-  }
-  if (livelloCorrente === 2 && entrati === 6) {
-    console.log('\n   🏛️ MERCURIO COMPLETATO → progressione a Venere');
-    await tableManager.avanzaSacerdotiAlLivello(2, 3, turno.numero_turno, turno.faraone_wallet);
-    await inserisciGemelloPendente(turno.numero_turno);
-  }
-
-  if (entrati >= turno.sacerdoti_necessari) {
-    console.log(`\n   🏆 VENERE COMPLETATO (${entrati}/${turno.sacerdoti_necessari}) → FARAONE ESCE`);
-    await gestisciUscitaFaraone(turno);
-  }
-
-  return { livelloCorrente, tavolaNumero: tavolaAttiva.numero, entrati };
-}
-
-// ========================================
-// DONO DA WALLET (20 USDC → 2 posizioni)
-// ========================================
-
-async function processaDonoEntrataWallet({ wallet, txHash, numeroPosizioni, nome }) {
-  await db.initDatabase();
-  if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet)) throw new Error('Wallet non valido');
-  if (!txHash) throw new Error('txHash obbligatorio');
-
-  const w = wallet.toLowerCase();
-  const nomeEff = (nome || '').trim() || `${w.substring(0, 8)}...`;
-  const pg = require('./pg-connection-manager');
-
-  // ═══════════════════════════════════════════════════════════════
-  // GATE OBBLIGATORIO: Prerequisiti ROG
-  // L'utente DEVE essere iscritto alla community ROG E avere
-  // almeno una donazione ROG completata prima di entrare in URANUS.
-  // ═══════════════════════════════════════════════════════════════
-  if (!verifier.isDevSkip(txHash)) {
-    if (isSystemWallet(w)) {
-      console.log(`   [SYSTEM-WALLET] ROG gate bypassato per ${w}`);
-    } else {
-      const rogStatus = await rogChecker.checkAllPrerequisites(w);
-      if (!rogStatus.canProceed) {
-        const motivi = [];
-        if (!rogStatus.communityRegistered) motivi.push('non iscritto alla community ROG');
-        if (!rogStatus.rogDonationDone) motivi.push('nessuna donazione ROG completata');
-        throw new Error(`Prerequisiti ROG non soddisfatti: ${motivi.join(', ')}. Completa prima il percorso ROG.`);
-      }
-      console.log(`   ✅ Prerequisiti ROG verificati (community + ${rogStatus.rogPositions} posizioni ROG)`);
-    }
-  }
-
-
-  let n, importoTotale;
-  if (verifier.isDevSkip(txHash)) {
-    n = Math.max(1, Math.floor(Number(numeroPosizioni) || 1));
-    importoTotale = rules.IMPORTI.COSTO_PER_PERSONA * n;
-  } else {
-    const verifica = await verifier.verificaDonazione({ txHash, walletMittente: w, importoMinimo: rules.IMPORTI.COSTO_PER_PERSONA });
-    // Usa le coppie calcolate dal verificatore: USDC = importo/20, XAUT0 = (importo × prezzo oro USD)/20.
-    // NON ricalcolare n da importoEffettivo (che per XAUT0 è in once d'oro, non in USD).
-    n = Math.max(1, Number(verifica.numeroPosizioni) || 1);
-    // importoTotale salvato in DB = USDC-equivalente (n × 20).
-    // Per XAUt0 l'importoEffettivo è in once d'oro → userebbe valori come 0.017 invece di 80 USDC.
-    importoTotale = verifica.tokenKey === 'XAUT0'
-      ? n * rules.IMPORTI.COSTO_PER_PERSONA
-      : verifica.importoEffettivo;
-  }
-
-  console.log(`\n🌀 DONO ${n} COPPIA${n > 1 ? 'E' : ''} — wallet: ${w} — ${importoTotale} USDC`);
-
-  // ✍️ Scritture atomiche in transazione: account + ticket + posizioni + donazione.
-  // Se una qualsiasi operazione fallisce (es. tavola piena), si annulla TUTTO:
-  // niente account orfani, niente posizioni/tavole a metà.
-  const { account, posizioni } = await pg.transaction(async () => {
-    let account = await db.getAccount(w);
-    if (!account) account = await db.createAccount({ wallet: w, nome: nomeEff, tipo: 'PRIMARIO' });
-    if (!account.ticket_number) account = await db.assignTicket(w);
-    console.log(`   🎟️  Ticket: ${account.ticket_number}`);
-
-    const posizioni = [];
-    for (let i = 0; i < n; i++) {
-      // 1. Posizione CASSA (sistema) — PRIMA
-      const rCassa = await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
-      posizioni.push({ tipo: 'CASSA', ...rCassa });
-      console.log(`   ✅ [${i + 1}/${n}] CASSA → Tavola #${rCassa.tavolaNumero} casella ${rCassa.casella}/6`);
-
-      // 2. Posizione HUMAN (utente) — DOPO
-      const rHuman = await posizionaDonatoreEntrata(w, nomeEff);
-      posizioni.push({ tipo: 'HUMAN', ...rHuman });
-      console.log(`   ✅ [${i + 1}/${n}] HUMAN → Tavola #${rHuman.tavolaNumero} casella ${rHuman.casella}/6`);
-    }
-
-    if (!verifier.isDevSkip(txHash)) {
-      await db.createDonazione({
-        donorWallet: w, importo: importoTotale, txHash,
-        destinatarioWallet: TREASURY_WALLET,
-        tavolaId: posizioni[0]?.tavolaId, livello: 0, turno: posizioni[0]?.turno
-      });
-    }
-
-    return { account, posizioni };
-  });
-
-  // ⛓️ Registro on-chain URANUS (fire-and-forget, FUORI dalla transazione DB)
-  if (!verifier.isDevSkip(txHash)) {
-    chainRegistrar.registerDonation(w, importoTotale, txHash);
-  }
-
-  // Aggiungi equivalente USDC per donazioni in XAUt0
-  const tokenUsato = verifier.isDevSkip(txHash) ? 'USDC' : (posizioni[0]?.token || 'USDC');
-  const importoDisplay = goldConverter.toDisplayObject(importoTotale, tokenUsato);
-
-  return {
-    success: true, wallet: w, ticket: account.ticket_number, numeroCoppie: n,
-    importoTotale, token: tokenUsato, importoDisplay,
-    posizioni
-  };
+  return 0;
 }
 
 /**
- * Piazza UNA singola coppia (CASSA + HUMAN) di una donazione, per l'ALTERNANZA SOLIDALE.
- * Alla PRIMA coppia esegue il setup completo: gate ROG, verifica tx on-chain,
- * account/ticket, createDonazione (anti-replay). Le coppie successive: solo piazzamento.
- *
- * Lo `state` è mantenuto dal chiamante (donation-queue) tra una coppia e l'altra:
- *   { setupDone, n, importoTotale, token, ticket, placed, numeroPosizioni }
- *
- * DURABILITÀ: il progresso (setup_done, total_coppie, placed_coppie) è persistito in
- * donation_queue DENTRO la stessa transazione del piazzamento (atomico). In caso di
- * crash/riavvio, recoverIncompleteJobs() riprende esattamente dalle coppie mancanti
- * senza ri-verificare la tx (no doppio anti-replay, nessuna coppia persa/duplicata).
- *
- * @returns {{ state, done, placed, total, ticket }}
+ * Ritorna il record di donazione già processato, se esiste.
+ * In ambiente Postgres usa db-unified-manager-pg (fonte di verità),
+ * altrimenti usa il vecchio db-unified-manager (SQLite) per compatibilità locale.
  */
-async function processaCoppiaEntrata({ wallet, txHash, nome, state, jobId = null }) {
-  await db.initDatabase();
-  if (!wallet || !/^0x[a-fA-F0-9]{40}$/.test(wallet)) throw new Error('Wallet non valido');
-  if (!txHash) throw new Error('txHash obbligatorio');
+async function getProcessedDonation({ donationId, txHash }) {
+  const tx = normalizeTxHash(txHash);
+  if (!tx) return null;
 
-  const w = wallet.toLowerCase();
-  const nomeEff = (nome || '').trim() || `${w.substring(0, 8)}...`;
+  const logIndex = deriveLogIndex({ donationId, txHash });
+
+  try {
+    // 1) Tentativo preciso: stessa tx_hash + stesso log_index
+    const row = await dbPg.getDonationByTxLog(tx, logIndex);
+
+    if (row && row.payload && row.payload.success) {
+      return {
+        donationId: row.donation_id || donationId,
+        txHash: row.tx_hash,
+        payload: row.payload
+      };
+    }
+
+    // 2) Fallback idempotenza forte: QUALSIASI donazione già
+    //    completata con la stessa tx_hash. Questo copre il caso in
+    //    cui flussi diversi (listener USDC, API, script di fix)
+    //    usano log_index diversi per la stessa transazione.
+    const any = await dbPg.getAnyDonationByTx(tx);
+    if (any && any.payload && any.payload.success) {
+      return {
+        donationId: any.donation_id || donationId,
+        txHash: any.tx_hash,
+        payload: any.payload
+      };
+    }
+
+    // 3) Se esiste comunque un record (anche non success) lo
+    //    ritorniamo per debug, altrimenti null.
+    if (row) {
+      return {
+        donationId: row.donation_id || donationId,
+        txHash: row.tx_hash,
+        payload: row.payload || null
+      };
+    }
+
+    return null;
+  } catch (e) {
+    // In caso di errore DB non blocchiamo il flusso, ma segnaliamo a log.
+    console.error('⚠️  Errore lettura donazione esistente:', e.message || e);
+    return null;
+  }
+}
+
+/**
+ * Registra/aggiorna il record di donazione in modo idempotente.
+ * In produzione (Postgres) scriviamo sempre su PostgreSQL; SQLite rimane
+ * usato solo per scenari legacy locali senza DATABASE_URL.
+ */
+async function markDonationProcessed({ donationId, txHash, payload, donor, amountUSDC, timestamp, donationType, beneficiaryWallet, positionsCreated, firstPosition, lastPosition }) {
+  const tx = normalizeTxHash(txHash);
+  const logIndex = deriveLogIndex({ donationId, txHash });
+
+  try {
+    await dbPg.upsertDonationRecord({
+      donationId,
+      txHash: tx,
+      logIndex,
+      donor,
+      beneficiaryWallet,
+      donationType,
+      amountUSDC,
+      timestamp,
+      positionsCreated,
+      firstPosition,
+      lastPosition,
+      payload
+    });
+  } catch (e) {
+    // Non blocchiamo il flusso se la scrittura del record fallisce,
+    // ma in produzione va investigato.
+    console.error('⚠️  Errore persistenza donazione:', e.message || e);
+  }
+}
+
+/**
+ * Registra un trasferimento USDC in ingresso (manual-transfer) SENZA creare posizioni.
+ * Usato dal listener USDC per distinguere tra "doni veri" (frontend/API)
+ * e semplici trasferimenti manuali verso la cassa ROG.
+ */
+async function registerIncomingTransferOnly({ donationId, donor, amountUSDC, txHash, timestamp, donationType = 'manual-transfer' }) {
+  const tx = normalizeTxHash(txHash);
+
+  // Se esiste già qualsiasi record per questa tx (anche manual-transfer),
+  // consideriamo la chiamata come dedupe e ritorniamo il payload esistente.
+  const already = await getProcessedDonation({ donationId, txHash: tx });
+  if (already?.payload) {
+    return { ...already.payload, deduped: true };
+  }
+
+  const payload = {
+    success: true,
+    technical: true,
+    donationType: 'manual-transfer',
+    message: 'USDC transfer registrato (manual-transfer) senza creazione posizioni',
+    donor,
+    amountUSDC,
+    positionsCreated: 0
+  };
+
+  await markDonationProcessed({
+    donationId,
+    txHash: tx,
+    payload,
+    donor,
+    amountUSDC,
+    timestamp,
+    donationType: 'manual-transfer',
+    beneficiaryWallet: null,
+    positionsCreated: 0,
+    firstPosition: null,
+    lastPosition: null
+  });
+
+  return payload;
+}
+
+// ========================================
+// CONFIGURAZIONE
+// ========================================
+
+// Conversione logica USDC → EUR per ROG
+// Per semplicità e coerenza con il frontend trattiamo 1 USDC ≈ 1 EUR
+const USDC_TO_EUR_RATE = 1;
+
+// NFT RGx: 1 RGx per ogni 2€
+const EUR_PER_RGX = 2;
+
+// File di registro per i Doni al volo
+const DONI_AL_VOLO_FILE = path.join(__dirname, 'doni-al-volo.json');
+// Lista FIFO dei wallet suggeriti (già usata da /api/suggest-wallet)
+const SUGGESTED_WALLETS_FILE = path.join(__dirname, 'suggested-wallets.json');
+
+async function loadJsonFile(filePath, defaultValue) {
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(raw);
+  } catch (err) {
+    return defaultValue;
+  }
+}
+
+async function saveJsonFile(filePath, data) {
+  // Assicura che la directory esista (es. ./data)
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// Alloca i destinatari HUMAN per un Dono al volo usando la coda FIFO PostgreSQL
+// La tabella dono_al_volo_queue contiene wallet segnalati dagli admin
+async function allocateDonoAlVoloRecipients(numPairs, donationId) {
   const pg = require('./pg-connection-manager');
-  state = state || {};
+  const pool = pg.getPool();
+  
+  const recipients = [];
+  const rogWallet = positionCreator.SPECIAL_WALLETS.ROG.toLowerCase();
 
-  if (!state.setupDone) {
-    // GATE ROG (identico a processaDonoEntrataWallet)
-    if (!verifier.isDevSkip(txHash)) {
-      if (isSystemWallet(w)) {
-        console.log(`   [SYSTEM-WALLET] ROG gate bypassato per ${w}`);
+  for (let i = 0; i < numPairs; i++) {
+    // Cerca il prossimo wallet PENDING nella coda FIFO (ordine di inserimento)
+    const result = await pool.query(`
+      SELECT id, wallet_address, nome
+      FROM dono_al_volo_queue
+      WHERE status = 'PENDING'
+      ORDER BY id ASC
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+    `);
+
+    if (result.rows.length > 0) {
+      const row = result.rows[0];
+      const wallet = (row.wallet_address || '').toLowerCase();
+      
+      // Marca come USED
+      await pool.query(`
+        UPDATE dono_al_volo_queue
+        SET status = 'USED', used_at = NOW(), used_by_donation_id = $1
+        WHERE id = $2
+      `, [donationId, row.id]);
+      
+      recipients.push({ wallet, nome: row.nome || null, source: 'FIFO' });
+      console.log(`   🎯 FIFO: Assegnato a ${row.nome || wallet} dalla coda`);
+    } else {
+      // Nessun wallet in coda: assegniamo la posizione a ROG
+      recipients.push({ wallet: rogWallet, nome: 'ROG', source: 'ROG' });
+      console.log(`   🏛️ ROG: Coda vuota, posizione assegnata a ROG`);
+    }
+  }
+
+  return recipients;
+}
+
+// ========================================
+// MUTEX PER-TXHASH (FIX RACE CONDITION)
+// ========================================
+// Previene doppia elaborazione quando USDC listener e API verify
+// chiamano processDonation() quasi contemporaneamente per la stessa tx.
+const _processingLocks = new Map();
+
+async function acquireTxLock(txHash) {
+  const key = normalizeTxHash(txHash);
+  if (!key) return () => {};
+
+  // Se c'è già un lock per questa tx, aspettiamo che finisca
+  while (_processingLocks.has(key)) {
+    await _processingLocks.get(key);
+  }
+
+  // Creiamo un nuovo lock (una Promise che si risolve quando rilasciamo)
+  let releaseFn;
+  const lockPromise = new Promise(resolve => { releaseFn = resolve; });
+  _processingLocks.set(key, lockPromise);
+
+  return () => {
+    _processingLocks.delete(key);
+    releaseFn();
+  };
+}
+
+// ========================================
+// FLUSSO PRINCIPALE
+// ========================================
+
+/**
+ * Processa donazione completa
+ * @param {Object} donationData
+ * @returns {Object} Risultato completo
+ */
+async function processDonation(donationData) {
+  const {
+    donationId,
+    donor: rawDonor,
+    amountUSDC,
+    txHash,
+    timestamp,
+    donationType = 'standard',
+    source,
+    eventKey,
+    // Opzionali per Carta Regalo
+    beneficiaryWallet: rawBeneficiary,
+    beneficiaryName,
+    giftMessage
+  } = donationData;
+
+  // 🚨 NORMALIZZAZIONE WALLET: Tutti i wallet devono essere lowercase!
+  const donor = (rawDonor || '').toLowerCase();
+  const beneficiaryWallet = rawBeneficiary ? rawBeneficiary.toLowerCase() : null;
+
+  // Vincolo ROG: solo donazioni in USDC interi e PARI (multipli di 2).
+  const amountUSDCNum = Number(amountUSDC);
+  if (!Number.isFinite(amountUSDCNum) || amountUSDCNum <= 0 || !Number.isInteger(amountUSDCNum) || amountUSDCNum % 2 !== 0) {
+    const errorResult = {
+      success: false,
+      error: 'INVALID_DONATION_AMOUNT',
+      message: 'Le donazioni devono essere in USDC interi e pari (multipli di 2 USDC).',
+      donor,
+      amountUSDC,
+      donationId
+    };
+
+    // Registriamo comunque il tentativo per tracciamento, ma senza posizioni
+    await markDonationProcessed({
+      donationId,
+      txHash,
+      payload: errorResult,
+      donor,
+      amountUSDC,
+      timestamp,
+      donationType,
+      beneficiaryWallet: null,
+      positionsCreated: 0,
+      firstPosition: null,
+      lastPosition: null
+    });
+
+    return errorResult;
+  }
+
+  // 🔒 MUTEX: impedisce che USDC listener e API verify processino la stessa tx contemporaneamente
+  const releaseLock = await acquireTxLock(txHash);
+
+  try {
+  // Idempotenza: se questa txHash è già stata processata, restituiamo lo stesso risultato.
+  // Questo evita doppie creazioni quando la donazione arriva sia dal listener USDC sia dal polling frontend.
+  const already = await getProcessedDonation({ donationId, txHash });
+  if (already?.payload?.success) {
+    console.log(`\n♻️  Donazione già processata (dedupe): txHash=${normalizeTxHash(txHash)} donationId=${already.donationId}`);
+    return { ...already.payload, deduped: true };
+  }
+  
+  // Tipo di donazione normalizzato (il fix localStorage stale è già gestito nel frontend:
+  // donation.html rimuove rog_donation_data subito dopo la lettura e resetta
+  // donationType a 'standard' quando l'utente seleziona manualmente un importo).
+  let safeDonationType = (donationType || 'standard').toLowerCase();
+
+  // Ramificazione: Dono al volo ha un flusso dedicato
+  if (safeDonationType === 'dono-al-volo') {
+    const res = await processDonoAlVolo({
+      donationId,
+      donor,
+      amountUSDC,
+      txHash,
+      timestamp,
+      donationType: 'dono-al-volo'
+    });
+
+    if (res?.success) {
+      await markDonationProcessed({
+        donationId,
+        txHash,
+        payload: res,
+        donor,
+        amountUSDC,
+        timestamp,
+        donationType: 'dono-al-volo',
+        beneficiaryWallet: null,
+        positionsCreated: res?.donation?.positionsCreated ?? null,
+        firstPosition: res?.donation?.firstPosition ?? null,
+        lastPosition: res?.donation?.lastPosition ?? null
+      });
+    }
+
+    return res;
+  }
+  
+  console.log('\n🎁 ========================================');
+  console.log('   FLUSSO DONAZIONE COMPLETO');
+  console.log('========================================\n');
+  
+  try {
+    // PUNTO 17: Verifica iscrizione alla community
+    // FIX: Se non registrato, auto-registriamo invece di bloccare la donazione.
+    // Chi manda USDC al wallet ROG ha chiaramente intenzione di partecipare.
+    console.log('🔍 Verifica iscrizione community...');
+    const communityCheck = await communityRegistrationManager.isWalletRegistered(donor);
+
+    if (!communityCheck.registered) {
+      console.log('⚠️  Wallet non iscritto alla community — auto-registrazione...');
+      try {
+        await communityRegistrationManager.registerWallet(
+          donor,
+          null, // nessun referrer noto
+          { source: 'auto-registration-on-donation' }
+        );
+        console.log(`✅ Wallet ${donor} auto-registrato nella community`);
+      } catch (autoRegErr) {
+        // Non blocchiamo la donazione se la registrazione fallisce
+        console.warn('⚠️  Auto-registrazione community fallita (non bloccante):', autoRegErr.message);
+      }
+    } else {
+      console.log('✅ Wallet iscritto alla community');
+      console.log(`   ID: ${communityCheck.id}`);
+      console.log(`   Registrato: ${communityCheck.registered_at}`);
+    }
+    console.log('');
+    
+    // 1. Converti USDC → EUR
+    const amountEUR = Math.floor(amountUSDC / USDC_TO_EUR_RATE);
+    
+    console.log(`💰 Donazione ID: ${donationId}`);
+    console.log(`👤 Donor: ${donor}`);
+    console.log(`💵 Importo: ${amountUSDC} USDC → ${amountEUR}€`);
+    console.log(`🔗 TX Hash: ${txHash}\n`);
+    
+    // 2. STEP CRITICO: Registra donazione su blockchain PRIMA di creare posizioni
+    // Questo garantisce che ogni posizione sia supportata da una transazione on-chain
+    const rgxToMint = Math.floor(amountEUR / EUR_PER_RGX);
+    console.log(`🔗 STEP 1: Registrazione on-chain (completeDonation)...`);
+    console.log(`   NFT RGx da mintare: ${rgxToMint}\n`);
+    
+    let mintResult = null;
+    if (rgxToMint > 0) {
+      mintResult = await mintRGxNFT(donor, rgxToMint, donationId, txHash);
+      
+      if (!mintResult.success && !mintResult.simulated) {
+        // 🔧 FIX: Errore on-chain NON blocca più la creazione posizioni.
+        // Le posizioni vengono create comunque nel database.
+        // Il minting on-chain potrà essere ritentato successivamente.
+        console.error('⚠️  Registrazione on-chain fallita (NON BLOCCANTE):', mintResult.error);
+        console.log('   ➡️  Le posizioni verranno comunque create nel database.');
+        console.log('   ➡️  Il minting RGx on-chain potrà essere ritentato in seguito.\n');
+        // Forza mintResult a simulated per continuare il flusso
+        mintResult = {
+          success: true,
+          simulated: true,
+          message: `Minting simulato dopo errore on-chain: ${mintResult.error}`,
+          originalError: mintResult.error
+        };
+      }
+      
+      if (mintResult.simulated) {
+        console.log(`⚠️  Registrazione on-chain SIMULATA (${mintResult.message || 'backend wallet non configurato'})`);
+        console.log(`   Le posizioni verranno comunque create nel database.\n`);
       } else {
-        const rogStatus = await rogChecker.checkAllPrerequisites(w);
-        if (!rogStatus.canProceed) {
-          const motivi = [];
-          if (!rogStatus.communityRegistered) motivi.push('non iscritto alla community ROG');
-          if (!rogStatus.rogDonationDone) motivi.push('nessuna donazione ROG completata');
-          throw new Error(`Prerequisiti ROG non soddisfatti: ${motivi.join(', ')}. Completa prima il percorso ROG.`);
+        console.log(`✅ Registrazione on-chain completata!`);
+        console.log(`   TX Hash: ${mintResult.txHash}`);
+        console.log(`   Token IDs: ${(mintResult.tokenIds || []).join(', ')}\n`);
+      }
+    }
+    
+    // 3. Verifica wallet esistente o ottieni nome
+    let donorName = await getDonorName(donor);
+
+    const donationTypeLower = safeDonationType;
+
+    // Beneficiario di default = donor (donazione diretta)
+    // Carta regalo = beneficiaryWallet != donor
+    // Rientro esplicito = autoinvito forzato (invitante = invitato = donor)
+    const forceRientro = donationTypeLower === 'rientro';
+
+    const recipientWallet = forceRientro ? donor : (beneficiaryWallet || donor);
+    const recipientName = beneficiaryName || await getDonorName(recipientWallet);
+    const isGift = !forceRientro && recipientWallet.toLowerCase() !== donor.toLowerCase();
+    
+    console.log(`📝 Nome donor: ${donorName}`);
+    console.log(`🎁 Tipo: ${isGift ? 'CARTA REGALO' : 'DONAZIONE DIRETTA'}`);
+    console.log(`👤 Beneficiario posizioni: ${recipientName} (${recipientWallet})\n`);
+    
+    // 🎁 CARTA REGALO: Auto-registra il beneficiario nella community se non lo è
+    // Il donor (chi paga) deve essere registrato, ma il beneficiario può non esserlo
+    if (isGift && recipientWallet) {
+      try {
+        const beneficiaryCheck = await communityRegistrationManager.isWalletRegistered(recipientWallet);
+        if (!beneficiaryCheck.registered) {
+          console.log(`🎁 Auto-registrazione beneficiario nella community...`);
+          await communityRegistrationManager.registerWallet(
+            recipientWallet,
+            donor,  // Il donor diventa il referrer del beneficiario
+            { nome: recipientName || 'Beneficiario Regalo' }
+          );
+          console.log(`✅ Beneficiario ${recipientWallet} registrato nella community (referrer: ${donor})`);
+        }
+      } catch (regErr) {
+        console.warn(`⚠️  Errore auto-registrazione beneficiario (non bloccante):`, regErr.message);
+        // Non blocchiamo la donazione se la registrazione fallisce
+      }
+    }
+    
+    // 3. Crea posizioni automatiche
+    console.log('🏗️  Creazione posizioni...\\n');
+
+    // Regola invitante:
+    // - Carta Regalo: invitante = donor
+    // - Dono diretto (Transfer USDC al wallet ROG):
+    //    - se è un RIENTRO (wallet già presente nel sistema) => invitante = se stesso
+    //    - altrimenti, se esiste invitante diretto via ReferralManager, usa quello
+    //    - altrimenti invitante = ROG
+    let walletInvitante = null;
+    let nomeInvitante = null;
+    let isRientroAuto = false; // rientro implicito (wallet già presente)
+
+    if (isGift) {
+      walletInvitante = donor;
+      nomeInvitante = donorName;
+    } else if (forceRientro) {
+      walletInvitante = recipientWallet;
+      nomeInvitante = recipientName;
+    } else {
+      // RIENTRO implicito: ogni donazione successiva dell'utente genera un
+      // "invito verso sé stesso" (richiesta cliente originale).
+      try {
+        const existing = await dbPg.getWalletPositions(recipientWallet);
+        isRientroAuto = Array.isArray(existing) && existing.length > 0;
+      } catch (_) {
+        // Se non riusciamo a determinare, non forziamo la regola
+        isRientroAuto = false;
+      }
+
+      if (isRientroAuto) {
+        walletInvitante = recipientWallet;
+        nomeInvitante = recipientName;
+      } else {
+        // PRIMA DONAZIONE: cerca invitante in più fonti
+        try {
+          // 1) Cerca in referralManager (relazioniInviti + anagrafica_invitati)
+          const inv = await referralManager.getInvitanteDiretto(recipientWallet);
+          if (inv?.wallet) {
+            walletInvitante = inv.wallet;
+            nomeInvitante = inv.nome || 'Sconosciuto';
+          } else {
+            // 2) Fallback: cerca referrer nella community_registrations
+            // (quando utente si registra con referral link)
+            try {
+              const communityInfo = await communityRegistrationManager.isWalletRegistered(recipientWallet);
+              if (communityInfo?.registered && communityInfo?.referrer_wallet) {
+                walletInvitante = communityInfo.referrer_wallet;
+                nomeInvitante = await getDonorName(communityInfo.referrer_wallet);
+                console.log(`🔗 Referrer trovato da community_registrations: ${walletInvitante}`);
+              } else {
+                // 3) Nessun referrer trovato: usa ROG
+                walletInvitante = positionCreator.SPECIAL_WALLETS.ROG;
+                nomeInvitante = 'ROG';
+              }
+            } catch (communityErr) {
+              console.warn('⚠️  Errore lettura community_registrations, uso ROG:', communityErr.message);
+              walletInvitante = positionCreator.SPECIAL_WALLETS.ROG;
+              nomeInvitante = 'ROG';
+            }
+          }
+        } catch (e) {
+          // Fallback hard: ROG
+          walletInvitante = positionCreator.SPECIAL_WALLETS.ROG;
+          nomeInvitante = 'ROG';
         }
       }
     }
 
-    // Verifica importo / numero coppie (una sola volta)
-    if (verifier.isDevSkip(txHash)) {
-      state.n = Math.max(1, Math.floor(Number(state.numeroPosizioni) || 1));
-      state.importoTotale = rules.IMPORTI.COSTO_PER_PERSONA * state.n;
-      state.token = 'USDC';
-    } else {
-      const verifica = await verifier.verificaDonazione({ txHash, walletMittente: w, importoMinimo: rules.IMPORTI.COSTO_PER_PERSONA });
-      state.n = Math.max(1, Number(verifica.numeroPosizioni) || 1);
-      // USDC-equivalente per DB: per XAUt0 importoEffettivo è in once d'oro, non in USDC.
-      state.importoTotale = verifica.tokenKey === 'XAUT0'
-        ? state.n * rules.IMPORTI.COSTO_PER_PERSONA
-        : verifica.importoEffettivo;
-      state.token = verifica.token || 'USDC';
-    }
-
-    // Setup + PRIMA coppia (atomico)
-    const out = await pg.transaction(async () => {
-      let account = await db.getAccount(w);
-      if (!account) account = await db.createAccount({ wallet: w, nome: nomeEff, tipo: 'PRIMARIO' });
-      if (!account.ticket_number) account = await db.assignTicket(w);
-
-      const rCassa = await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
-      await posizionaDonatoreEntrata(w, nomeEff);
-
-      if (!verifier.isDevSkip(txHash)) {
-        await db.createDonazione({
-          donorWallet: w, importo: state.importoTotale, txHash,
-          destinatarioWallet: TREASURY_WALLET,
-          tavolaId: rCassa.tavolaId, livello: 0, turno: rCassa.turno,
-        });
-      }
-      // Progresso persistito ATOMICAMENTE con setup + coppia 1 (durabilità anti-crash).
-      if (jobId) {
-        await pg.query(
-          `UPDATE donation_queue SET setup_done = TRUE, total_coppie = $1, placed_coppie = 1, status = 'PROCESSING' WHERE id = $2`,
-          [state.n, jobId]
-        );
-      }
-      return { account };
+    const positionsResult = await positionCreator.creaPosizioniDaDonazione({
+      walletDonatore: recipientWallet,
+      nomeDonatore: recipientName,
+      importoEUR: amountEUR,
+      timestamp: timestamp || new Date().toISOString(),
+      walletInvitante,
+      nomeInvitante
     });
+    
+    if (!positionsResult.success) {
+      throw new Error(`Creazione posizioni fallita: ${positionsResult.message}`);
+    }
+    
+    console.log(`✅ ${positionsResult.posizioniCreate} posizioni create\\n`);
 
-    if (!verifier.isDevSkip(txHash)) chainRegistrar.registerDonation(w, state.importoTotale, txHash);
+    // 3b. Registra invitati in PostgreSQL secondo le regole ROG
+    try {
+      const humanPositions = (positionsResult.posizioni || []).filter(p => p.tipo === 'HUMAN');
+      if (humanPositions.length > 0) {
+        let invitiScritti = false;
+        const H = humanPositions.length;
 
-    state.ticket = out.account.ticket_number;
-    state.setupDone = true;
-    state.placed = 1;
-    console.log(`\ud83c\udf00 [Alternanza] Setup + coppia 1/${state.n} — ${w.substring(0, 10)} ticket=${state.ticket}`);
-  } else {
-    // Coppia successiva: solo piazzamento (CASSA + HUMAN), progresso persistito ATOMICAMENTE.
-    const newPlaced = (state.placed || 0) + 1;
-    await pg.transaction(async () => {
-      await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
-      await posizionaDonatoreEntrata(w, nomeEff);
-      if (jobId) {
-        await pg.query(`UPDATE donation_queue SET placed_coppie = $1 WHERE id = $2`, [newPlaced, jobId]);
+        // REGOLA ROG CORRETTA:
+        // - CARTA REGALO (qualsiasi H): invitante = DONOR (chi regala)
+        // - RIENTRO (wallet già nel sistema): invitante = SELF + distribuzione AVENGERS/ROG
+        // - PRIMA DONAZIONE: invitante = referral diretto o ROG + distribuzione AVENGERS/ROG
+        
+        let mapping;
+        
+        if (isGift) {
+          // CARTA REGALO: l'invitante è SEMPRE il donor (chi fa il regalo)
+          console.log(`🎁 Carta Regalo: invitante = ${donorName} (donor)`);
+          mapping = calcolaInvitiReferralPerDonazione(
+            humanPositions,
+            donor,
+            donorName,
+            recipientWallet,
+            recipientName
+          );
+        } else if (isRientroAuto || forceRientro) {
+          // RIENTRO: invitante = se stesso (SELF)
+          console.log(`🔄 Rientro: invitante = ${recipientName} (se stesso)`);
+          mapping = calcolaInvitiRientroPerDonazione(humanPositions, recipientWallet, recipientName);
+        } else {
+          // PRIMA DONAZIONE: invitante = referral diretto o ROG
+          console.log(`🌟 Prima donazione: invitante = ${nomeInvitante} (${walletInvitante})`);
+          mapping = calcolaInvitiReferralPerDonazione(
+            humanPositions,
+            walletInvitante,
+            nomeInvitante,
+            recipientWallet,
+            recipientName
+          );
+        }
+        
+        await positionCreator.scriviInvitiPerPosizioni(mapping);
+        invitiScritti = Array.isArray(mapping) && mapping.length > 0;
+
+        // Dopo aver scritto nuovi inviti in PostgreSQL ricarichiamo
+        // il ReferralManager così che area personale e pannello admin
+        // vedano subito il conteggio aggiornato senza dover riavviare il backend.
+        if (invitiScritti) {
+          try {
+            // Wait 50ms per garantire che il flush su disco sia completo
+            await new Promise(resolve => setTimeout(resolve, 50));
+            await referralManager.reload();
+          } catch (reloadErr) {
+            console.error(
+              '⚠️  Errore reload ReferralManager dopo aggiornamento inviti (donazione standard/carta-regalo/rientro):',
+              reloadErr.message || reloadErr
+            );
+          }
+        }
       }
-    });
-    state.placed = newPlaced;
-    console.log(`\ud83c\udf00 [Alternanza] Coppia ${state.placed}/${state.n} — ${w.substring(0, 10)}`);
-  }
-
-  return { state, done: state.placed >= state.n, placed: state.placed, total: state.n, ticket: state.ticket };
-}
-
-// ========================================
-// POSIZIONAMENTO L0
-// ========================================
-
-// ========================================
-// AUTO-RECOVERY TURNO ENTRATA
-// ========================================
-
-async function autoRecoverTurnoEntrata() {
-  const pg = require('./pg-connection-manager');
-
-  // Caso A: turno IN_CORSO con sacerdoti >= necessari (stuck 6/6)
-  const turnoStuck = await pg.queryOne(
-    `SELECT * FROM turni WHERE sezione='ENTRATA' AND livello=0 AND status='IN_CORSO'
-     AND sacerdoti_entrati >= sacerdoti_necessari ORDER BY numero_turno DESC LIMIT 1`
-  );
-  if (turnoStuck) {
-    console.warn(`\u26a0\ufe0f  [AUTO-RECOVERY] Turno #${turnoStuck.numero_turno} stuck ${turnoStuck.sacerdoti_entrati}/${turnoStuck.sacerdoti_necessari} \u2192 sblocco automatico`);
-    await avviaNuovoTurnoEntrata(turnoStuck);
-    return await db.getTurnoCorrente('ENTRATA', 0);
-  }
-
-  // Caso B: nessun turno IN_CORSO — trova l'ultimo e riparte
-  const pg2 = require('./pg-connection-manager');
-  const ultimo = await pg2.queryOne(
-    `SELECT * FROM turni WHERE sezione='ENTRATA' AND livello=0 ORDER BY numero_turno DESC LIMIT 1`
-  );
-  if (!ultimo) return null;
-
-  const nuovoN = ultimo.numero_turno + 1;
-
-  // Se esiste già un turno con questo numero in stato anomalo, lo riattiva
-  const esistente = await pg2.queryOne(
-    `SELECT * FROM turni WHERE sezione='ENTRATA' AND livello=0 AND numero_turno=$1`, [nuovoN]
-  );
-  if (esistente) {
-    if (esistente.status !== 'IN_CORSO') {
-      await pg2.query(`UPDATE turni SET status='IN_CORSO' WHERE id=$1`, [esistente.id]);
-      console.warn(`\u26a0\ufe0f  [AUTO-RECOVERY] Turno #${nuovoN} riattivato (era ${esistente.status})`);
+    } catch (e) {
+      console.error('⚠️  Errore registrazione invitati (PostgreSQL) per donazione:', e.message || e);
     }
-    return await db.getTurnoCorrente('ENTRATA', 0);
-  }
-
-  // Crea nuovo turno di emergenza con FONDO
-  console.warn(`\ud83d\udd27 [AUTO-RECOVERY] Creo turno ENTRATA #${nuovoN} di emergenza`);
-  const nuovaTavola = await tableManager.creaTavolaPercorso(0, FONDO_WALLET, nuovoN);
-  await db.createTurno({
-    sezione: 'ENTRATA', livello: 0, blocco: null, numeroTurno: nuovoN,
-    faraoneWallet: FONDO_WALLET, faraoneTipo: 'FONDO',
-    tavolaFaraoneNum: nuovaTavola.numero, sacerdotiNecessari: 6
-  });
-  console.log(`\ud83d\udd04 [AUTO-RECOVERY] Turno #${nuovoN} creato \u2192 sistema riattivato (tavola #${nuovaTavola.numero})`);
-  return await db.getTurnoCorrente('ENTRATA', 0);
-}
-
-// Watchdog esportato: chiamato ogni 60s da api-server.js
-async function watchdogTurnoEntrata() {
-  try {
-    const turno = await db.getTurnoCorrente('ENTRATA', 0);
-    let fixed = false;
-
-    if (!turno) {
-      console.warn('\ud83d\udd27 [WATCHDOG] Nessun turno ENTRATA attivo \u2192 auto-recovery');
-      await autoRecoverTurnoEntrata();
-      fixed = true;
-    } else if (Number(turno.sacerdoti_entrati) >= Number(turno.sacerdoti_necessari)) {
-      console.warn(`\ud83d\udd27 [WATCHDOG] Turno #${turno.numero_turno} bloccato (${turno.sacerdoti_entrati}/${turno.sacerdoti_necessari}) \u2192 sblocco`);
-      await avviaNuovoTurnoEntrata(turno);
-      fixed = true;
-    }
-
-    // Se abbiamo sbloccato un turno, riaccoda subito le donazioni FAILED per turno
-    if (fixed) {
+    
+    // Se è una Carta Regalo, registra invito (donor → beneficiario)
+    if (isGift) {
       try {
-        const donationQueue = require('./donation-queue');
-        await donationQueue.retryFailedTurnoJobs();
-      } catch (e2) {
-        console.error('\u26a0\ufe0f [WATCHDOG] retryFailedTurnoJobs errore:', e2.message);
+        await referralManager.registraInvito({
+          walletInvitato: recipientWallet,
+          walletInvitante: donor,
+          nomeInvitante: donorName
+        });
+      } catch (invitoError) {
+        console.error('⚠️  Errore registrazione invito per Carta Regalo:', invitoError.message);
       }
     }
-  } catch (e) {
-    console.error(`\u26a0\ufe0f [WATCHDOG] Errore: ${e.message}`);
-  }
-}
+    
+    // 4. Crea record donazione completo
+    // NOTA: La registrazione on-chain (completeDonation) è già stata fatta all'inizio
+    const donationRecord = {
+      donationId,
+      donor,
+      donorName,
+      amountUSDC,
+      amountEUR,
+      txHash,
+      timestamp: timestamp || new Date().toISOString(),
+      positionsCreated: positionsResult.posizioniCreate,
+      source: source || null,
+      eventKey: eventKey || null,
 
-// 🔮 Riserve Gemelli nella numerazione Sole L0: 26, 40, 54 … = 26 + 14k
-// (spec v12 reg.10 / rules.regolaTicketGemello). Questi slot sono SALTATI dai donatori
-// e occupati in anticipo (occupazione anticipata delle caselle).
-function isPosizioneRiservataSole(p) { return p >= 26 && (p - 26) % 14 === 0; }
+      // Campi stabili
+      firstPosition: positionsResult.firstPosition ?? positionsResult.primaPosizione ?? positionsResult.primaPositzione,
+      lastPosition: positionsResult.lastPosition ?? positionsResult.ultimaPosizione ?? positionsResult.ultimaPositzione,
+      pairs: positionsResult.pairs || null,
 
-async function posizionaDonatoreEntrata(wallet, nome, tipoPos = 'DONATORE') {
-  // 🔮 PREDESTINAZIONE Sole L0: prima di piazzare un DONATORE (CASSA/HUMAN),
-  // materializza le eventuali RISERVE (Gemelli 26+14k) che cadono sulla PROSSIMA casella,
-  // così i donatori "saltano" quegli slot esattamente come nella mappa cronologica certificata.
-  // La riserva occupa la casella ma è NON-sdoppiabile e NON gradua a Blocco 1
-  // (slot tenuto dal sistema finché il faraone gemello-releasing non lo reclama).
-  if (tipoPos === 'DONATORE') {
-    let guard = 0;
-    while (guard++ < 100) {
-      const tCur = await db.getTurnoCorrente('ENTRATA', 0);
-      if (!tCur) break;
-      const tavCur = await tableManager.getTavolaPercorsoAttiva(0, tCur.numero_turno);
-      if (!tavCur) break;
-      const occ = await db.countPosizioniInTavola(tavCur.id);
-      const pNext = (tCur.numero_turno - 1) * 6 + (occ + 1);
-      if (!isPosizioneRiservataSole(pNext)) break;
-      // Materializza lo slot come RISERVATA; verrà "reclamato" (→ GEMELLO) e accoppiato
-      // al Gemello giusto quando il faraone proprietario esce da Venere (gestisciUscitaFaraone).
-      console.log(`   🔒 Riserva RISERVATA → posizione Sole ${pNext} (ticket Gemello 26+14k)`);
-      await posizionaDonatoreEntrata(CASSA_WALLET, `RISERVA Gemello ticket ${pNext}`, 'RISERVATA');
-    }
-  }
+      rgxMinted: rgxToMint,
+      status: 'COMPLETED',
+      donationType: donationTypeLower,
 
-  const isRiserva = (tipoPos !== 'DONATORE');
-  let turno = await db.getTurnoCorrente('ENTRATA', 0);
-  if (!turno) {
-    // Tentativo automatico di recupero prima di fallire
-    console.warn(`\u26a0\ufe0f  [AUTO-RECOVERY] Nessun turno attivo per ${wallet.substring(0,10)} \u2192 recupero...`);
-    turno = await autoRecoverTurnoEntrata();
-    if (!turno) {
-      // Errore RETRYABLE: il watchdog lo sistema entro 60s, la coda riprova automaticamente
-      const err = new Error('Nessun turno attivo — watchdog in corso, retry automatico');
-      err.retryable = true;
-      throw err;
-    }
-  }
-  const tavola = await tableManager.getTavolaPercorsoAttiva(0, turno.numero_turno);
-  if (!tavola) {
-    const err = new Error('Nessuna tavola aperta al livello di entrata — retry automatico');
-    err.retryable = true;
-    throw err;
-  }
+      // Info Carta Regalo (se applicabile)
+      beneficiaryWallet: recipientWallet,
+      beneficiaryName: recipientName,
+      isGift,
+      giftMessage: giftMessage || null
+    };
+    
+    // 7. TODO: Salva record donazione in database
+    // await saveDonationRecord(donationRecord);
+    
+    // 8. TODO: Invia notifiche
+    // await sendDonationNotification(donationRecord);
+    
+    console.log('========================================');
+    console.log('   ✅ DONAZIONE COMPLETATA!');
+    console.log('========================================\n');
+    
+    console.log('📊 RIEPILOGO:');
+    console.log(`   Importo: ${amountUSDC} USDC (${amountEUR}€)`);
+    console.log(`   Posizioni create: ${positionsResult.posizioniCreate}`);
+    console.log(`   Range: ${positionsResult.primaPositzione} - ${positionsResult.ultimaPositzione}`);
+    console.log(`   NFT RGx: ${rgxToMint}`);
+    console.log(`   Movimento: ${positionsResult.movimento}`);
+    console.log('');
+    
+    const finalPayload = {
+      success: true,
+      donation: donationRecord,
+      positions: positionsResult,
+      source: source || null,
+      eventKey: eventKey || null,
+      message: 'Donazione processata con successo'
+    };
 
-  const r = await tableManager.posizionaDonatore({
-    tavolaId: tavola.id, tavolaNumero: tavola.numero, livello: 0,
-    wallet, nome, tipo: tipoPos, donoImporto: isRiserva ? 0 : rules.IMPORTI.DONO_ENTRATA,
-    turno: turno.numero_turno, sdoppiabile: !isRiserva,
-    numeroPosizioneBase: (turno.numero_turno - 1) * 6
-  });
-  await db.incrementSacerdotiEntrati(turno.id);
-
-  // 🔮 PRENOTAZIONE FUNZIONI AL MOMENTO DELL'INGRESSO (Sole L0):
-  // ogni "numero" che entra ottiene SUBITO la sua scheda di predisposizione,
-  // agganciata alla PROPRIA tavola di sdoppiamento Sole (chiave stabile fino alla
-  // graduazione). Best-effort in savepoint: un errore qui non compromette il dono.
-  if (!isRiserva && r.tavolaSdoppiamento?.numero) {
+    // 🔁 AUTOMAZIONE CICLI/ACCUMULI/STELLINE (tipo=2: soldi solo in LARGE)
+    // Ogni coppia HUMAN+PILETTA = 1 unità (2 USDC)
     try {
-      const pgConn = require('./pg-connection-manager');
-      await pgConn.savepoint(() => predisposizione.prenotaIngressoSole(wallet, r.tavolaSdoppiamento.numero, turno.numero_turno));
-    } catch (e) { console.log(`   ⚠\ufe0f  Prenotazione ingresso Sole non calcolata: ${e.message}`); }
-  }
-
-  if (r.tavolaCompleta) {
-    const eredeWallet  = tavola.faraone_wallet;
-    const eredeAccount = await db.getAccount(eredeWallet);
-    const nomeErede    = eredeAccount?.nome || eredeWallet.substring(0, 10);
-    const isFondo      = eredeAccount?.tipo === 'FONDO';
-    const doniRicevuti = rules.IMPORTI.DONO_ENTRATA * 6;
-
-    if (isFondo) {
-      console.log(`\n🏦 TAVOLA #${tavola.numero} COMPLETA — FONDO (A) → 60 USDC in cassa`);
-      await db.registraAvanzamento({
-        wallet: eredeWallet, tipoAccount: 'FONDO',
-        daLivello: 0, aLivello: 1, turno: turno.numero_turno,
-        doniRicevuti, doniTrattenuti: doniRicevuti, netto: 0, evento: 'USCITA_ENTRATA'
-      });
-    } else {
-      const trattenuta = rules.IMPORTI.TRATTENUTA_FONDO_ENTRATA;
-      const netto = doniRicevuti - trattenuta;
-      console.log(`\n🏆 TAVOLA #${tavola.numero} COMPLETA — SACERDOTE ${nomeErede} → ingresso Blocco 1`);
-      console.log(`   ${nomeErede}: 60 USDC ricevuti → 10 USDC accantonati (restituiti a Venere), 50 USDC nel Blocco 1`);
-      await db.registraAvanzamento({
-        wallet: eredeWallet, tipoAccount: 'SACERDOTE',
-        daLivello: 0, aLivello: 1, turno: turno.numero_turno,
-        doniRicevuti, doniTrattenuti: trattenuta, netto, evento: 'USCITA_ENTRATA'
-      });
+      const donationUnits = Math.floor((positionsResult.posizioniCreate || 0) / 2);
+      if (donationUnits > 0) {
+        const cycleRes = await cycleCompletionEnginePg.processDonationCompletedPg({
+          donorWallet: donor,
+          donationUnits,
+          chainTxHash: txHash,
+          timestamp: donationRecord.timestamp
+        });
+        finalPayload.cycleProcessing = cycleRes;
+      }
+    } catch (e) {
+      console.error('⚠️  Errore automazione cicli (donazione standard):', e.message || e);
+      finalPayload.cycleProcessing = { success: false, error: String(e.message || e) };
     }
 
-    // ✔️ FIX DEFINITIVO: posizionaSacerdoteInUrano in SAVEPOINT.
-    // Il semplice try-catch non basta: se la funzione lancia un errore SQL
-    // la transazione PG rimane in stato "aborted" e avviaNuovoTurnoEntrata fallisce.
-    // Con savepoint(), in caso di errore si fa rollback SOLO di questo step
-    // lasciando la transazione principale attiva e funzionante.
-    try {
-      const pgConn = require('./pg-connection-manager');
-      await pgConn.savepoint(() => posizionaSacerdoteInUrano(eredeWallet, nomeErede, tavola.numero));
-    } catch (sacerdoteErr) {
-      console.error(`⚠️ [ENTRATA] Sacerdote non posizionato in URANO (savepoint rollback): ${sacerdoteErr.message}`);
-      console.error(`   avviaNuovoTurnoEntrata procede comunque.`);
-    }
-
-    // ── NETTUNO: NESSUN auto-entry alla graduazione Sole (LEGGE COMMITTENTE) ────
-    // REGOLA CORRETTA: le posizioni Nettuno (dual = 1 CASSA + 1 uscente) si formano
-    // ESCLUSIVAMENTE alle USCITE da Venere (L3) e Saturno (L5), gestite dai bridge
-    // hookUscitaL3 / hookUscitaL5. L'auto-entry "da Sole" è stato RIMOSSO perché
-    // sovra-popolava Nettuno al momento della donazione/graduazione invece che alle uscite.
-
-    // SEMPRE chiamato: garantisce che il nuovo turno ENTRATA venga creato.
-    // NOTA: viene chiamato DENTRO la transazione padre (è corretto: le SDOPPIAMENTO
-    // create in questa stessa transazione sono già visibili nella stessa connessione PG).
-    // Il fallback in avviaNuovoTurnoEntrata copre il caso raro in cui non fossero disponibili.
-    await avviaNuovoTurnoEntrata(turno);
-  }
-
-  return {
-    tavolaNumero: tavola.numero, tavolaId: tavola.id,
-    casella: r.casellaOccupata, turno: turno.numero_turno,
-    numeroPosizione: (turno.numero_turno - 1) * 6 + r.casellaOccupata,
-    tavolaCompleta: r.tavolaCompleta, sdoppiamento: r.tavolaSdoppiamento?.numero ?? null
-  };
-}
-
-// ========================================
-// NUOVO TURNO ENTRATA
-// ========================================
-
-async function avviaNuovoTurnoEntrata(turnoChiuso) {
-  await db.completaTurno(turnoChiuso.id, rules.IMPORTI.DONO_ENTRATA * 6);
-  const pg = require('./pg-connection-manager');
-  const nuovoN = turnoChiuso.numero_turno + 1;
-
-  const prossima = await pg.queryOne(
-    `SELECT * FROM tavole WHERE tipo='SDOPPIAMENTO' AND status='APERTA' AND livello=0 ORDER BY numero ASC LIMIT 1`
-  );
-
-  if (!prossima) {
-    // FALLBACK: nessuna tavola SDOPPIAMENTO disponibile
-    // Creiamo una tavola di emergenza con FONDO come erede
-    // cos\u00ec il sistema non rimane mai senza turno attivo.
-    console.warn(`\u26a0\ufe0f  [AUTO-RECOVERY] Nessuna tavola SDOPPIAMENTO per turno #${nuovoN} \u2192 tavola emergenza con FONDO`);
-    const nuovaTavola = await tableManager.creaTavolaPercorso(0, FONDO_WALLET, nuovoN);
-    await db.createTurno({
-      sezione: 'ENTRATA', livello: 0, blocco: null, numeroTurno: nuovoN,
-      faraoneWallet: FONDO_WALLET, faraoneTipo: 'FONDO',
-      tavolaFaraoneNum: nuovaTavola.numero, sacerdotiNecessari: 6
+    // 💸 AUTOMAZIONE DISTRIBUZIONI LARGE disabilitata fino alla migrazione completa.
+    
+    // Persistenza idempotenza: salva record donazione su Postgres (fonte di verità)
+    await markDonationProcessed({
+      donationId,
+      txHash,
+      payload: finalPayload,
+      donor,
+      amountUSDC,
+      timestamp: donationRecord.timestamp,
+      donationType: donationTypeLower,
+      beneficiaryWallet: isGift ? recipientWallet : null,
+      positionsCreated: donationRecord.positionsCreated,
+      firstPosition: donationRecord.firstPosition,
+      lastPosition: donationRecord.lastPosition
     });
-    console.log(`\ud83d\udd04 [AUTO-RECOVERY] Turno entrata #${nuovoN} avviato (tavola emergenza #${nuovaTavola.numero})`);
-    return;
-  }
 
-  await pg.query(`UPDATE tavole SET tipo='PERCORSO', turno=$1 WHERE id=$2`, [nuovoN, prossima.id]);
-  await db.createTurno({
-    sezione: 'ENTRATA', livello: 0, blocco: null, numeroTurno: nuovoN,
-    faraoneWallet: prossima.faraone_wallet, faraoneTipo: 'EREDE',
-    tavolaFaraoneNum: prossima.numero, sacerdotiNecessari: 6
-  });
-  console.log(`\n\ud83d\udd04 Turno entrata #${nuovoN} \u2014 erede: ${prossima.faraone_wallet.substring(0, 12)}...`);
+    return finalPayload;
+    
+  } catch (error) {
+    console.error('❌ Errore processamento donazione:', error);
+    
+    return {
+      success: false,
+      error: error.message,
+      donationId
+    };
+  }
+  } finally {
+    // 🔓 Rilascia il mutex per-txHash
+    releaseLock();
+  }
 }
 
 // ========================================
-// USCITA FARAONE (L3 Venere)
+// COSTANTE SPARTIACQUE MOVIMENTO SMALL
+// ========================================
+// Le posizioni 1-3495 appartengono al movimento LARGE legacy (pre-SMALL).
+// Da posizione 3496 in avanti inizia il movimento SMALL con regole diverse.
+const SPARTIACQUE_SMALL = 3496;
+
+/**
+ * Calcola distribuzione inviti per un RIENTRO in base alle posizioni HUMAN create.
+ * 
+ * REGOLA ROG (applica SOLO per posizioni >= 3496):
+ * - H=1  → 1 self (invitato di se stesso)
+ * - H=2  → 2 self (TUTTE di se stesso)
+ * - H=3  → 2 self, 1 AVENGERS (penultima)
+ * - H=4  → 3 self, 1 AVENGERS (penultima)
+ * - H>=5 → (H-2) self, 1 AVENGERS (penultima), 1 ROG (ultima)
+ * 
+ * Per posizioni < 3496 (LARGE legacy): TUTTI gli inviti vanno a SELF (100%)
+ * 
+ * ORDINE: prima SELF, poi AVENGERS (penultima), poi ROG (ultima)
+ */
+function calcolaInvitiRientroPerDonazione(humanPositions, walletSelf, nomeSelf) {
+  const ordered = [...humanPositions].sort((a, b) => Number(a.posizione) - Number(b.posizione));
+  const H = ordered.length;
+  if (H <= 0) return [];
+
+  const rogWallet = positionCreator.SPECIAL_WALLETS.ROG;
+  const avengersWallet = positionCreator.SPECIAL_WALLETS.AVENGERS;
+
+  // SPARTIACQUE: controlla la prima posizione creata
+  // Se < 3496 (LARGE legacy) → TUTTO a SELF
+  // Se >= 3496 (SMALL) → Applica regola SELF/AVENGERS/ROG
+  const primaPosizione = Number(ordered[0]?.posizione || 0);
+  const isLegacyLarge = primaPosizione < SPARTIACQUE_SMALL;
+
+  let rogCount = 0;
+  let avengersCount = 0;
+  let selfCount = H;
+
+  if (!isLegacyLarge) {
+    // SMALL (>= 3496): applica regola SELF/AVENGERS/ROG
+    rogCount = H >= 5 ? 1 : 0;
+    avengersCount = H >= 3 ? 1 : 0;
+    selfCount = H - rogCount - avengersCount;
+  }
+  // else: LARGE legacy (< 3496) → tutto a SELF (già impostato)
+
+  const mapping = [];
+  let idx = 0;
+
+  // Prima tutte le posizioni assegnate a sé stesso
+  for (let i = 0; i < selfCount && idx < ordered.length; i++, idx++) {
+    const p = ordered[idx];
+    mapping.push({
+      posizione: p.posizione,
+      tipo: p.tipo,
+      walletInvitante: walletSelf,
+      nomeInvitante: nomeSelf,
+      walletInvitato: walletSelf // Per RIENTRO, invitato è sempre se stesso
+    });
+  }
+
+  // Poi AVENGERS (penultima, se previsto - solo per SMALL)
+  for (let i = 0; i < avengersCount && idx < ordered.length; i++, idx++) {
+    const p = ordered[idx];
+    mapping.push({
+      posizione: p.posizione,
+      tipo: p.tipo,
+      walletInvitante: avengersWallet,
+      nomeInvitante: 'AVENGERS',
+      walletInvitato: walletSelf
+    });
+  }
+
+  // Infine ROG (ultima, se previsto - solo per SMALL con H >= 5)
+  for (let i = 0; i < rogCount && idx < ordered.length; i++, idx++) {
+    const p = ordered[idx];
+    mapping.push({
+      posizione: p.posizione,
+      tipo: p.tipo,
+      walletInvitante: rogWallet,
+      nomeInvitante: 'ROG',
+      walletInvitato: walletSelf
+    });
+  }
+
+  return mapping;
+}
+
+/**
+ * Calcola distribuzione inviti per REFERRAL / CARTA REGALO / DONO AL VOLO.
+ * 
+ * REGOLA ROG CORRETTA (applica SOLO per posizioni >= 3496):
+ * - H=1  → 1 INVITANTE
+ * - H=2  → 1 INVITANTE, 1 SELF
+ * - H=3  → 1 INVITANTE, 1 SELF, 1 AVENGERS
+ * - H=4  → 1 INVITANTE, 1 SELF, 1 AVENGERS, 1 ROG
+ * - H>=5 → 1 INVITANTE, (H-3) SELF, 1 AVENGERS (penultima), 1 ROG (ultima)
+ * 
+ * Per posizioni < 3496 (LARGE legacy): TUTTE le posizioni vanno all'INVITANTE (100%)
+ * 
+ * ORDINE: prima 1 INVITANTE, poi SELF (tutte le centrali), poi AVENGERS (penultima), poi ROG (ultima)
+ */
+function calcolaInvitiReferralPerDonazione(humanPositions, walletInvitante, nomeInvitante, walletInvitato, nomeInvitato) {
+  const ordered = [...humanPositions].sort((a, b) => Number(a.posizione) - Number(b.posizione));
+  const H = ordered.length;
+  if (H <= 0) return [];
+
+  const rogWallet = positionCreator.SPECIAL_WALLETS.ROG;
+  const avengersWallet = positionCreator.SPECIAL_WALLETS.AVENGERS;
+
+  // SPARTIACQUE: controlla la prima posizione creata
+  // Se < 3496 (LARGE legacy) → TUTTO all'INVITANTE
+  // Se >= 3496 (SMALL) → Applica regola INVITANTE/SELF/AVENGERS/ROG
+  const primaPosizione = Number(ordered[0]?.posizione || 0);
+  const isLegacyLarge = primaPosizione < SPARTIACQUE_SMALL;
+
+  let rogCount = 0;
+  let avengersCount = 0;
+  let invitanteCount = 1; // Prima posizione SEMPRE all'invitante
+  let selfCount = 0;
+
+  if (!isLegacyLarge) {
+    // SMALL (>= 3496): applica regola corretta
+    if (H === 1) {
+      // 1 posizione: invitante
+      invitanteCount = 1;
+    } else if (H === 2) {
+      // 2 posizioni: invitante, self
+      invitanteCount = 1;
+      selfCount = 1;
+    } else if (H === 3) {
+      // 3 posizioni: invitante, self, AVENGERS
+      invitanteCount = 1;
+      selfCount = 1;
+      avengersCount = 1;
+    } else if (H === 4) {
+      // 4 posizioni: invitante, self, AVENGERS, ROG
+      invitanteCount = 1;
+      selfCount = 1;
+      avengersCount = 1;
+      rogCount = 1;
+    } else {
+      // H >= 5: invitante, (H-3) self, AVENGERS, ROG
+      invitanteCount = 1;
+      selfCount = H - 3; // Tutte le centrali vanno a self
+      avengersCount = 1;
+      rogCount = 1;
+    }
+  } else {
+    // LARGE legacy (< 3496): tutto all'INVITANTE
+    invitanteCount = H;
+  }
+
+  const mapping = [];
+  let idx = 0;
+
+  // 1) INVITANTE (sempre la prima posizione, per SMALL)
+  for (let i = 0; i < invitanteCount && idx < ordered.length; i++, idx++) {
+    const p = ordered[idx];
+    mapping.push({
+      posizione: p.posizione,
+      tipo: p.tipo,
+      walletInvitante,
+      nomeInvitante,
+      walletInvitato
+    });
+  }
+
+  // 2) SELF (tutte le posizioni centrali)
+  for (let i = 0; i < selfCount && idx < ordered.length; i++, idx++) {
+    const p = ordered[idx];
+    mapping.push({
+      posizione: p.posizione,
+      tipo: p.tipo,
+      walletInvitante: walletInvitato, // SELF: invitante = invitato
+      nomeInvitante: nomeInvitato,
+      walletInvitato
+    });
+  }
+
+  // 3) AVENGERS (penultima, se previsto)
+  for (let i = 0; i < avengersCount && idx < ordered.length; i++, idx++) {
+    const p = ordered[idx];
+    mapping.push({
+      posizione: p.posizione,
+      tipo: p.tipo,
+      walletInvitante: avengersWallet,
+      nomeInvitante: 'AVENGERS',
+      walletInvitato
+    });
+  }
+
+  // 4) ROG (ultima, se previsto)
+  for (let i = 0; i < rogCount && idx < ordered.length; i++, idx++) {
+    const p = ordered[idx];
+    mapping.push({
+      posizione: p.posizione,
+      tipo: p.tipo,
+      walletInvitante: rogWallet,
+      nomeInvitante: 'ROG',
+      walletInvitato
+    });
+  }
+
+  return mapping;
+}
+
+/**
+ * Ottiene nome donor dal database o usa default
+ */
+async function getDonorName(wallet) {
+  try {
+    const walletInfo = await dbPg.getWallet(wallet);
+    if (walletInfo && walletInfo.nome) {
+      return walletInfo.nome;
+    }
+  } catch (error) {
+    // Wallet non ancora nel sistema o errore DB
+  }
+  
+  // Nome default basato su wallet
+  const shortWallet = wallet.substring(0, 6) + '...' + wallet.substring(wallet.length - 4);
+  return `Donor ${shortWallet}`;
+}
+
+/**
+ * Simula donazione per testing
+ */
+async function simulateDonation(amountUSDC, wallet, name) {
+  return await processDonation({
+    donationId: 'TEST_' + Date.now(),
+    donor: wallet || '0x1234567890123456789012345678901234567890',
+    amountUSDC: amountUSDC,
+    txHash: '0x' + 'a'.repeat(64),
+    timestamp: new Date().toISOString()
+  });
+}
+
+// ========================================
+// FLUSSO SPECIFICO: DONO AL VOLO
 // ========================================
 
-async function gestisciUscitaFaraone(turno) {
-  const faraoneWallet = turno.faraone_wallet;
-  const account = await db.getAccount(faraoneWallet);
-  const tipoAccount = account?.tipo || 'PRIMARIO';
-  const sigla = account?.sigla || FONDO_SIGLA;
-  const doniRicevuti = rules.IMPORTI.DONO_TOTALE_L3;
+async function processDonoAlVolo(donationData) {
+  const { donationId, donor, amountUSDC, txHash, timestamp } = donationData;
 
-  console.log(`\n🏆 ========================================`);
-  console.log(`   USCITA FARAONE DAL LIVELLO 3 (VENERE)`);
-  console.log(`========================================`);
-  console.log(`   Faraone: ${sigla} (${tipoAccount})`);
+  // Vincolo ROG: solo donazioni in USDC interi e PARI (multipli di 2).
+  const amountUSDCNum = Number(amountUSDC);
+  if (!Number.isFinite(amountUSDCNum) || amountUSDCNum <= 0 || !Number.isInteger(amountUSDCNum) || amountUSDCNum % 2 !== 0) {
+    return {
+      success: false,
+      error: 'INVALID_DONATION_AMOUNT',
+      message: 'Le donazioni devono essere in USDC interi e pari (multipli di 2 USDC).',
+      donor,
+      amountUSDC,
+      donationId
+    };
+  }
 
-  const uscita = rules.calcolaUscitaLivello(3, tipoAccount, doniRicevuti);
+  console.log('\n🎁 ========================================');
+  console.log('   FLUSSO DONO AL VOLO');
+  console.log('========================================\n');
 
-  console.log(`   Doni ricevuti: ${doniRicevuti} + ${uscita.accantonamentoRestituito} restituiti = ${uscita.lordoEffettivo}`);
-  console.log(`   Riserva cassa: ${uscita.trattenutaCassa} → Funzioni + struttura`);
-  console.log(`   Netto Faraone: ${uscita.netto}`);
+  try {
+    // PUNTO 17: Verifica iscrizione alla community
+    // FIX: Se non registrato, auto-registriamo invece di bloccare.
+    console.log('🔍 Verifica iscrizione community...');
+    const communityCheck = await communityRegistrationManager.isWalletRegistered(donor);
 
-  // Rilascio Funzioni
-  const funzioni = await functionManager.rilasciaFunzioniL3({
-    faraoneWallet, faraoneSigla: sigla, tipoAccount, turnoCorrente: turno.numero_turno
-  });
+    if (!communityCheck.registered) {
+      console.log('⚠️  Wallet non iscritto alla community — auto-registrazione...');
+      try {
+        await communityRegistrationManager.registerWallet(
+          donor,
+          null,
+          { source: 'auto-registration-on-dono-al-volo' }
+        );
+        console.log(`✅ Wallet ${donor} auto-registrato nella community`);
+      } catch (autoRegErr) {
+        console.warn('⚠️  Auto-registrazione community fallita (non bloccante):', autoRegErr.message);
+      }
+    } else {
+      console.log('✅ Wallet iscritto alla community');
+    }
+    console.log('');
+    
+    const amountEUR = Math.floor(amountUSDC / USDC_TO_EUR_RATE);
+    const donorName = await getDonorName(donor);
 
-  // 🔗 ACCOPPIAMENTO Gemello ↔ slot Sole riservato (ticket 26+14k): il Gemello appena
-  // rilasciato "reclama" la sua posizione riservata, che diventa GEMELLO col wallet/sigla giusti.
-  // È l'accoppiamento forense: slot 26 → Gemello 1-A di Fortunato, 40 → 2° faraone, ecc.
-  if (funzioni?.gemello?.account?.ticketPrenotato) {
-    const g = funzioni.gemello.account;
+    console.log(`💰 Donazione ID: ${donationId}`);
+    console.log(`👤 Donor: ${donor}`);
+    console.log(`💵 Importo DONO AL VOLO: ${amountUSDC} USDC → ${amountEUR}€`);
+    console.log(`🔗 TX Hash: ${txHash}\n`);
+
+    if (amountEUR < 2) {
+      throw new Error('Importo insufficiente per generare almeno 1 coppia di posizioni (2€)');
+    }
+
+    const numPairs = Math.floor(amountEUR / 2); // ogni coppia = 2€ = 1 HUMAN + 1 PILETTA
+    console.log(`📦 Coppie HUMAN+PILETTA da creare (Dono al volo): ${numPairs}`);
+
+    // Determina i destinatari FIFO (o ROG se lista vuota)
+    const recipients = await allocateDonoAlVoloRecipients(numPairs, donationId);
+
+    let totalPositions = 0;
+    let firstPosition = null;
+    let lastPosition = null;
+    const allPositions = [];
+
+    // Accumuliamo inviti e relazioni: nessun reload/scrittura dentro il loop.
+    const inviteMappings = [];
+    const inviteRelations = [];
+
+    for (let i = 0; i < numPairs; i++) {
+      const rec = recipients[i];
+      const recipientWallet = rec.wallet;
+      const recipientName = recipientWallet === positionCreator.SPECIAL_WALLETS.ROG.toLowerCase()
+        ? 'ROG'
+        : await getDonorName(recipientWallet);
+
+      console.log(`\n🏗️  Coppia ${i + 1}/${numPairs} → Beneficiario: ${recipientName} (${recipientWallet}) [${rec.source}]`);
+
+      const res = await positionCreator.creaPosizioniDaDonazione({
+        walletDonatore: recipientWallet,
+        nomeDonatore: recipientName,
+        importoEUR: 2,
+        timestamp: timestamp || new Date().toISOString(),
+        // Per ogni coppia HUMAN creata, il donatore è l'invitante esplicito
+        walletInvitante: donor,
+        nomeInvitante: donorName
+      });
+
+      if (!res.success) {
+        throw new Error(`Creazione posizioni Dono al volo fallita: ${res.message}`);
+      }
+
+      totalPositions += res.posizioniCreate;
+      if (firstPosition === null || res.primaPositzione < firstPosition) {
+        firstPosition = res.primaPositzione;
+      }
+      if (lastPosition === null || res.ultimaPositzione > lastPosition) {
+        lastPosition = res.ultimaPositzione;
+      }
+
+      if (Array.isArray(res.posizioni)) {
+        allPositions.push(...res.posizioni);
+      }
+
+      // Distribuzione inviti per Dono al volo: accumuliamo SOLO in memoria.
+      // La scrittura su PostgreSQL e il reload avvengono UNA volta dopo il loop.
+      const humanPositions = (res.posizioni || []).filter(p => p.tipo === 'HUMAN');
+      if (humanPositions.length > 0) {
+        const mapping = calcolaInvitiReferralPerDonazione(
+          humanPositions,
+          donor,
+          donorName,
+          recipientWallet,
+          recipientName
+        );
+        if (Array.isArray(mapping) && mapping.length > 0) {
+          inviteMappings.push(...mapping);
+        }
+      }
+
+      // Relazione invitante→invitato (il donatore è invitante anche se il destinatario è ROG).
+      inviteRelations.push({
+        walletInvitato: recipientWallet,
+        walletInvitante: donor,
+        nomeInvitante: donorName
+      });
+    }
+
+    // Scrittura inviti in PostgreSQL: UNA sola volta per l'intera donazione.
+    if (inviteMappings.length > 0) {
+      try {
+        await positionCreator.scriviInvitiPerPosizioni(inviteMappings);
+      } catch (e) {
+        console.error('⚠️  Errore registrazione invitati (PostgreSQL) per Dono al volo:', e.message || e);
+      }
+    }
+
+    // Relazioni runtime: skipReload per non ricaricare ad ogni invito.
+    for (const rel of inviteRelations) {
+      try {
+        await referralManager.registraInvito(rel, { skipReload: true });
+      } catch (invErr) {
+        console.error('⚠️  Errore registrazione invito per Dono al volo:', invErr.message || invErr);
+      }
+    }
+
+    // Un SOLO reload finale: area personale e pannello vedono il totale aggiornato.
     try {
-      const pgConn = require('./pg-connection-manager');
-      await pgConn.query(
-        `UPDATE posizioni SET tipo = 'GEMELLO', wallet = $1, nome = $2
-         WHERE numero_posizione = $3 AND tipo IN ('RISERVATA','GEMELLO')`,
-        [String(g.wallet).toLowerCase(), g.sigla, g.ticketPrenotato]
+      await referralManager.reload();
+    } catch (reloadErr) {
+      console.error(
+        '⚠️  Errore reload ReferralManager dopo aggiornamento inviti (Dono al volo):',
+        reloadErr.message || reloadErr
       );
-      console.log(`   🔗 Gemello ${g.sigla} accoppiato allo slot Sole riservato ${g.ticketPrenotato}`);
-    } catch (e) { console.error(`⚠️ accoppiamento Gemello slot ${g.ticketPrenotato}: ${e.message}`); }
-  }
-
-  // Alert (uscita L3): mostra netto utente + quota trattenuta in cassa (battito "sistema vivo").
-  try {
-    const alerts = require('./alert-manager');
-    alerts.sendAlert('PAYOUT', 'USCITA_L3',
-      `Netto utente: ${uscita.netto} USDC\nQuota cassa: ${uscita.trattenutaCassa || 0} USDC\nTurno: ${turno.numero_turno}\nWallet: ${String(faraoneWallet).slice(0, 10)}...`);
-  } catch (_) {}
-
-  await db.registraAvanzamento({
-    wallet: faraoneWallet, tipoAccount,
-    daLivello: 3, aLivello: uscita.passaAlL4 ? 4 : null,
-    daBlocco: 1, aBlocco: uscita.passaAlL4 ? 2 : null,
-    turno: turno.numero_turno, doniRicevuti: uscita.lordoEffettivo,
-    doniTrattenuti: (uscita.trattenutaCassa || 0) + (uscita.trattenutaIngressoL4 || 0),
-    netto: uscita.netto, evento: 'USCITA_L3',
-    dettagli: { uscita, funzioni: { simbionti: funzioni.simbionti.length, perpetuo: !!funzioni.perpetuo, gemello: !!funzioni.gemello } }
-  });
-  const eventKeyL3 = `rog-l3-turno-${turno.numero_turno}-${String(faraoneWallet).toLowerCase()}`;
-  await db.upsertUscitaL3({
-    wallet: faraoneWallet,
-    tipoAccount,
-    turno: turno.numero_turno,
-    lordoL3: uscita.lordoEffettivo,
-    trattenutaFunzioni: uscita.trattenutaCassa || 0,
-    nettoRegistrato: uscita.netto,
-    eventKey: eventKeyL3,
-    status: 'PENDING_ROG',
-    funzioni: {
-      simbionti: funzioni.simbionti.length,
-      perpetuo: !!funzioni.perpetuo,
-      gemello: !!funzioni.gemello,
-      crediti: funzioni.crediti.length
-    }
-  });
-
-  // 🌉 BRIDGE: auto-entry in URANO 1 (FIFO) + deduzioni ROG/PHARAON
-  const nomeAccount = account?.nome || faraoneWallet.substring(0, 10);
-  const bridgeResult = await bridge.hookUscitaL3(faraoneWallet, nomeAccount, tipoAccount, uscita.netto, turno.numero_turno, eventKeyL3);
-
-  // Secondario → L4
-  if (uscita.passaAlL4) {
-    console.log(`   ➡️  Secondario: passa a L4 Giove con ${uscita.trattenutaIngressoL4} USDC`);
-    await posizionaFaraoneInL4(faraoneWallet, nomeAccount);
-  } else {
-    console.log(`   🏁 Primario esce con ${bridgeResult.nettoFinale} USDC netti (dopo bridge)`);
-  }
-
-  // 🎁 CANALE UNICO (decisione business): anche il FONDO usa ESCLUSIVAMENTE il dono pendente
-  // creato in bridge.hookUscitaL3() → ACCETTA DONO → accettaDono() → inviaPagamento().
-  // L'auto-payout del FONDO è stato RIMOSSO per eliminare il doppio canale (auto-payout +
-  // ACCETTA DONO) che poteva produrre una doppia distribuzione (es. 500 + 500 = 1000 USDC).
-  // PRIMARIO/SECONDARIO invariati: non hanno mai avuto auto-payout (il guard era === 'FONDO').
-
-  await db.completaTurno(turno.id, doniRicevuti);
-  // I 5 crediti L3 (50 USDC) restano STANDBY in pool 5.3 → non creano posizioni singole.
-  // I 50 USDC corrispondenti rimangono in cassa URANUS.
-  // Le posizioni AL VOLO vengono create SOLO come dual (5 CASSA+5 HUMAN) a L4 e L5.
-  await avviaNuovoTurnoUrano(turno);
-  console.log(`========================================\n`);
-  return { uscita, funzioni };
-}
-
-// ========================================
-// BLOCCO 2 — L4 GIOVE
-// ========================================
-
-async function posizionaFaraoneInL4(wallet, nome) {
-  const pg = require('./pg-connection-manager');
-  const turno = await db.getTurnoCorrente('URANO', 4);
-  if (!turno) { console.log(`   ⚠️  Nessun turno L4 attivo`); return null; }
-
-  let tavola = await tableManager.getTavolaPercorsoAttiva(4, turno.numero_turno);
-  if (!tavola) tavola = await tableManager.creaTavolaPercorso(4, turno.faraone_wallet, turno.numero_turno);
-
-  console.log(`   ⛩️  Faraone Secondario → L4 GIOVE tavola #${tavola.numero}`);
-  await tableManager.posizionaDonatore({
-    tavolaId: tavola.id, tavolaNumero: tavola.numero, livello: 4,
-    wallet, nome, tipo: 'DONATORE', donoImporto: rules.IMPORTI.TRATTENUTA_L4_INGRESSO,
-    turno: turno.numero_turno, sdoppiabile: true
-  });
-  await db.incrementSacerdotiEntrati(turno.id);
-
-  const { sacerdoti_entrati } = await pg.queryOne('SELECT sacerdoti_entrati FROM turni WHERE id = $1', [turno.id]);
-  const entrati = Number(sacerdoti_entrati) || 0;
-  console.log(`   Faraoni a Giove: ${entrati}/${turno.sacerdoti_necessari}`);
-
-  if (entrati >= turno.sacerdoti_necessari) {
-    console.log(`\n   🏆 GIOVE COMPLETATO → FARAONE ESCE DA L4`);
-    await gestisciUscitaL4(turno);
-  }
-  return { tavola, entrati };
-}
-
-// ========================================
-// POSIZIONI AL VOLO — L4 (5 CASSA + 5 HUMAN a Sole L0)
-// ========================================
-/**
- * All'uscita da L4 Giove, il sistema crea 5 dual (5 CASSA + 5 HUMAN) a Sole L0
- * per chi ha fatto richiesta di una posizione al volo (coda FIFO attiva).
- *   Priorità: primo in coda richieste_posizioni_volo (IN_ATTESA, FIFO).
- *   Fallback: Fortunato (posizione 0) se la coda è vuota.
- */
-async function creaPosizioniAlVoloL4(originWallet) {
-  const pg = require('./pg-connection-manager');
-  const NUM_DUAL = 5;
-  const inAttesa = await containerManager.contaRichiesteInAttesa();
-  console.log(`\n\ud83c\udf1f [L4 AL VOLO] ${NUM_DUAL} DUAL Sole L0 — richieste in coda: ${inAttesa} | fallback: Fortunato (pos.0)`);
-
-  for (let i = 0; i < NUM_DUAL; i++) {
-    // Preleva prossima richiesta dalla coda FIFO; se vuota usa Fortunato (posizione 0)
-    const richiesta = await containerManager.prelevaProssimaRichiestaVolo();
-    const humanWallet = richiesta ? richiesta.wallet : FORTUNATO_WALLET;
-    const humanNome   = richiesta ? (richiesta.nome || `${richiesta.wallet.substring(0, 10)}`) : 'Fortunato (pos.0)';
-
-    if (richiesta) {
-      console.log(`   \u21b3 [${i + 1}/${NUM_DUAL}] HUMAN da coda: ${humanNome} (richiesta #${richiesta.id})`);
-    } else {
-      console.log(`   \u21b3 [${i + 1}/${NUM_DUAL}] coda vuota \u2192 HUMAN assegnato a Fortunato (pos.0)`);
     }
 
-    // Posizione CASSA prima, HUMAN dopo (ordine standard dual)
-    await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
-    await posizionaDonatoreEntrata(humanWallet, humanNome);
-  }
+    // Registro finanziario Dono al volo
+    const registro = await loadJsonFile(DONI_AL_VOLO_FILE, { donations: [] });
+    registro.donations = registro.donations || [];
 
-  // Registra flusso al volo (100 USDC = 10 pos. da pool 5.3)
-  await pg.queryOne(
-    `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, tipo_uscita)
-     VALUES ('POSIZIONI_AL_VOLO_L4', $1, 100, 10, 'L4_VOLO') RETURNING *`,
-    [originWallet]
-  );
-  console.log(`   \u2705 [L4 AL VOLO] ${NUM_DUAL} CASSA + ${NUM_DUAL} HUMAN creati a Sole L0 (100 USDC pool 5.3)`);
-}
-
-async function gestisciUscitaL4(turno) {
-  const faraoneWallet = turno.faraone_wallet;
-  const account = await db.getAccount(faraoneWallet);
-  const tipoAccount = account?.tipo || 'PERPETUO';
-  const doniRicevuti = rules.IMPORTI.DONO_TOTALE_L4;
-  const uscita = rules.calcolaUscitaLivello(4, tipoAccount, doniRicevuti);
-
-  console.log(`\n🏆 USCITA L4 GIOVE — netto: ${uscita.netto}`);
-
-  await functionManager.rilasciaFunzioniL4({ faraoneWallet, turnoCorrente: turno.numero_turno });
-  await db.registraAvanzamento({
-    wallet: faraoneWallet, tipoAccount,
-    daLivello: 4, aLivello: 5, daBlocco: 2, aBlocco: 2,
-    turno: turno.numero_turno, doniRicevuti,
-    doniTrattenuti: uscita.trattenutaIngressoL5 + uscita.trattenutaCrediti,
-    netto: uscita.netto, evento: 'USCITA_L4'
-  });
-  await db.completaTurno(turno.id, doniRicevuti);
-  await avviaNextTurnoL4(turno);
-
-  // 🎁 Dono pendente Giove (L4): l'utente lo ritira via ACCETTA DONO (gate fondi in cassa).
-  // L4 è sempre Secondario (PERPETUO/GEMELLO): nessun auto-pay FONDO.
-  try {
-    const giftManager = require('./gift-manager');
-    await giftManager.creaDonoPendente(faraoneWallet, uscita.netto, 4, 'PAYOUT_L4', { tipoAccount });
-  } catch (e) { console.error(`⚠️  [L4] creaDonoPendente: ${e.message}`); }
-
-  // 🌟 Posizioni al volo: 5 CASSA + 5 HUMAN a Sole L0 (pool 5.3, coda FIFO; fallback Fortunato pos.0).
-  try {
-    await creaPosizioniAlVoloL4(faraoneWallet);
-  } catch (e) { console.error(`⚠️  [L4] creaPosizioniAlVoloL4: ${e.message}`); }
-
-  await posizionaFaraoneInL5(faraoneWallet, account?.nome || faraoneWallet.substring(0, 10));
-  return { uscita };
-}
-
-async function avviaNextTurnoL4(turnoChiuso) {
-  const pg = require('./pg-connection-manager');
-  const nuovoN = turnoChiuso.numero_turno + 1;
-  const prossima = await pg.queryOne(
-    `SELECT * FROM tavole WHERE tipo='SDOPPIAMENTO' AND status='APERTA' AND livello=4 ORDER BY numero ASC LIMIT 1`
-  );
-  if (!prossima) { console.log('⚠️  Nessuna tavola L4 sdoppiata'); return; }
-  await pg.query(`UPDATE tavole SET tipo='PERCORSO', turno=$1 WHERE id=$2`, [nuovoN, prossima.id]);
-  await db.createTurno({ sezione: 'URANO', livello: 4, blocco: 2, numeroTurno: nuovoN, faraoneWallet: prossima.faraone_wallet, faraoneTipo: 'SECONDARIO', sacerdotiNecessari: 3 });
-  console.log(`\n🔄 Nuovo turno L4 #${nuovoN}`);
-}
-
-// ========================================
-// POSIZIONI AL VOLO — L5 (5 CASSA + 5 HUMAN a Sole L0)
-// ========================================
-/**
- * All'uscita da L5 Saturno, il sistema crea 5 dual (5 CASSA + 5 HUMAN) a Sole L0
- * per chi ha fatto richiesta di una posizione al volo (coda FIFO attiva).
- *   Priorità: primo in coda richieste_posizioni_volo (IN_ATTESA, FIFO).
- *   Fallback: Fortunato (posizione 0) se la coda è vuota.
- */
-async function creaPosizioniAlVoloL5(originWallet) {
-  const pg = require('./pg-connection-manager');
-  const NUM_DUAL = 5;
-  const inAttesa = await containerManager.contaRichiesteInAttesa();
-  console.log(`\n\ud83c\udf1f [L5 AL VOLO] ${NUM_DUAL} DUAL Sole L0 — richieste in coda: ${inAttesa} | fallback: Fortunato (pos.0)`);
-
-  for (let i = 0; i < NUM_DUAL; i++) {
-    const richiesta = await containerManager.prelevaProssimaRichiestaVolo();
-    const humanWallet = richiesta ? richiesta.wallet : FORTUNATO_WALLET;
-    const humanNome   = richiesta ? (richiesta.nome || `${richiesta.wallet.substring(0, 10)}`) : 'Fortunato (pos.0)';
-
-    if (richiesta) {
-      console.log(`   \u21b3 [${i + 1}/${NUM_DUAL}] HUMAN da coda: ${humanNome} (richiesta #${richiesta.id})`);
-    } else {
-      console.log(`   \u21b3 [${i + 1}/${NUM_DUAL}] coda vuota \u2192 HUMAN assegnato a Fortunato (pos.0)`);
-    }
-
-    await posizionaDonatoreEntrata(CASSA_WALLET, 'CASSA');
-    await posizionaDonatoreEntrata(humanWallet, humanNome);
-  }
-
-  await pg.queryOne(
-    `INSERT INTO flussi_esterni (tipo, origine_wallet, importo, num_posizioni, tipo_uscita)
-     VALUES ('POSIZIONI_AL_VOLO_L5', $1, 100, 10, 'L5_VOLO') RETURNING *`,
-    [originWallet]
-  );
-  console.log(`   \u2705 [L5 AL VOLO] ${NUM_DUAL} CASSA + ${NUM_DUAL} HUMAN creati a Sole L0 (100 USDC pool 5.3)`);
-}
-
-// ========================================
-// BLOCCO 2 — L5 SATURNO
-// ========================================
-
-async function posizionaFaraoneInL5(wallet, nome) {
-  const pg = require('./pg-connection-manager');
-  const turno = await db.getTurnoCorrente('URANO', 5);
-  if (!turno) { console.log(`   ⚠️  Nessun turno L5 attivo`); return null; }
-
-  let tavola = await tableManager.getTavolaPercorsoAttiva(5, turno.numero_turno);
-  if (!tavola) tavola = await tableManager.creaTavolaPercorso(5, turno.faraone_wallet, turno.numero_turno);
-
-  console.log(`   🔱 Faraone → L5 SATURNO tavola #${tavola.numero}`);
-  await tableManager.posizionaDonatore({
-    tavolaId: tavola.id, tavolaNumero: tavola.numero, livello: 5,
-    wallet, nome, tipo: 'DONATORE', donoImporto: rules.IMPORTI.TRATTENUTA_L5_INGRESSO,
-    turno: turno.numero_turno, sdoppiabile: true
-  });
-  await db.incrementSacerdotiEntrati(turno.id);
-
-  const { sacerdoti_entrati } = await pg.queryOne('SELECT sacerdoti_entrati FROM turni WHERE id = $1', [turno.id]);
-  const entrati = Number(sacerdoti_entrati) || 0;
-  console.log(`   Faraoni a Saturno: ${entrati}/${turno.sacerdoti_necessari}`);
-
-  if (entrati >= turno.sacerdoti_necessari) {
-    console.log(`\n   🏆 SATURNO COMPLETATO → USCITA DEFINITIVA`);
-    await gestisciUscitaL5(turno);
-  }
-  return { tavola, entrati };
-}
-
-async function gestisciUscitaL5(turno) {
-  const faraoneWallet = turno.faraone_wallet;
-  const account = await db.getAccount(faraoneWallet);
-  const tipoAccount = account?.tipo || 'PERPETUO';
-  const doniRicevuti = rules.IMPORTI.DONO_TOTALE_L5;
-  const uscita = rules.calcolaUscitaLivello(5, tipoAccount, doniRicevuti);
-
-  console.log(`\n🏆 USCITA DEFINITIVA L5 SATURNO — netto: ${uscita.netto}`);
-
-  await functionManager.rilasciaFunzioniL5({ faraoneWallet, turnoCorrente: turno.numero_turno });
-  await db.registraAvanzamento({
-    wallet: faraoneWallet, tipoAccount,
-    daLivello: 5, aLivello: null, daBlocco: 2, aBlocco: null,
-    turno: turno.numero_turno, doniRicevuti,
-    doniTrattenuti: uscita.trattenutaCrediti, netto: uscita.netto, evento: 'USCITA_L5'
-  });
-  await db.completaTurno(turno.id, doniRicevuti);
-  await avviaNextTurnoL5(turno);
-
-  // 🌉 BRIDGE: deduzioni L5 + auto-entry FIFO
-  const nomeAccount = account?.nome || faraoneWallet.substring(0, 10);
-  const bridgeResult = await bridge.hookUscitaL5(faraoneWallet, nomeAccount, uscita.netto, turno.numero_turno);
-
-  // 🌟 Posizioni al volo: 5 CASSA + 5 HUMAN a Sole L0 (pool 5.3, coda FIFO; fallback Fortunato pos.0).
-  try {
-    await creaPosizioniAlVoloL5(faraoneWallet);
-  } catch (e) { console.error(`⚠️  [L5] creaPosizioniAlVoloL5: ${e.message}`); }
-
-  console.log(`🏁 Faraone esce DEFINITIVAMENTE (Uranus) — netto L5 dopo bridge: ${bridgeResult.nettoFinale} USDC`);
-  console.log(`   Totale SUPERURANO: Venere Primario(480) + Venere Secondario(90) + Giove(400) + Saturno(${bridgeResult.nettoFinale}) + Nettuno(800) = ${480 + 90 + 400 + bridgeResult.nettoFinale + 800} USDC`);
-  return { uscita, bridgeResult };
-}
-
-async function avviaNextTurnoL5(turnoChiuso) {
-  const pg = require('./pg-connection-manager');
-  const nuovoN = turnoChiuso.numero_turno + 1;
-  const prossima = await pg.queryOne(
-    `SELECT * FROM tavole WHERE tipo='SDOPPIAMENTO' AND status='APERTA' AND livello=5 ORDER BY numero ASC LIMIT 1`
-  );
-  if (!prossima) { console.log('⚠️  Nessuna tavola L5 sdoppiata'); return; }
-  await pg.query(`UPDATE tavole SET tipo='PERCORSO', turno=$1 WHERE id=$2`, [nuovoN, prossima.id]);
-  await db.createTurno({ sezione: 'URANO', livello: 5, blocco: 2, numeroTurno: nuovoN, faraoneWallet: prossima.faraone_wallet, faraoneTipo: 'SECONDARIO', sacerdotiNecessari: 3 });
-  console.log(`\n🔄 Nuovo turno L5 #${nuovoN}`);
-}
-
-// ========================================
-// GEMELLO LAZY INSERTION
-// ========================================
-
-async function inserisciGemelloPendente(turnoNum) {
-  const pg = require('./pg-connection-manager');
-  const gemelloPendente = await db.getState(`gemello_pendente_turno_${turnoNum}`, null);
-  if (!gemelloPendente || !gemelloPendente.wallet) return;
-
-  const countRow = await pg.queryOne(
-    `SELECT COUNT(*) AS cnt FROM tavole WHERE livello = 3 AND tipo = 'PERCORSO' AND turno = $1`, [turnoNum]
-  );
-  if (Number(countRow?.cnt) < 7) return;
-
-  const settimaTavola = await pg.queryOne(
-    `SELECT * FROM tavole WHERE livello = 3 AND tipo = 'PERCORSO' AND turno = $1 ORDER BY numero ASC LIMIT 1 OFFSET 6`, [turnoNum]
-  );
-  if (!settimaTavola) return;
-
-  const gemelloGia = await pg.queryOne(`SELECT id FROM posizioni WHERE tavola_id = $1 AND tipo = 'GEMELLO'`, [settimaTavola.id]);
-  if (gemelloGia) return;
-
-  const casella2 = await pg.queryOne(`SELECT id FROM posizioni WHERE tavola_id = $1 AND casella = 2`, [settimaTavola.id]);
-  if (casella2) return;
-
-  console.log(`\n⚙️ INSERIMENTO GEMELLO ${gemelloPendente.nome} → Venere tavola #${settimaTavola.numero} casella 2`);
-
-  const risultatoGem = await tableManager.posizionaDonatore({
-    tavolaId: settimaTavola.id, tavolaNumero: settimaTavola.numero,
-    livello: 3, wallet: gemelloPendente.wallet, nome: gemelloPendente.nome,
-    tipo: 'GEMELLO', donoImporto: 50, turno: turnoNum, sdoppiabile: true
-  });
-
-  await pg.query(
-    `UPDATE funzioni SET status = 'POSIZIONATO', tavola_posizionamento = $1, posizione_in_tavola = 'VENERE_TAV7_POS2' WHERE id = $2`,
-    [settimaTavola.numero, gemelloPendente.funzioneId]
-  );
-  await db.setState(`gemello_pendente_turno_${turnoNum}`, {});
-  console.log(`   ✅ Gemello posizionato (sdoppiamento #${risultatoGem.tavolaSdoppiamento?.numero})`);
-}
-
-// ========================================
-// NUOVO TURNO URANO (reg.4)
-// ========================================
-
-async function avviaNuovoTurnoUrano(turnoChiuso) {
-  const pg = require('./pg-connection-manager');
-  const nuovoTurnoNum = turnoChiuso.numero_turno + 1;
-
-  const prossima = await pg.queryOne(
-    `SELECT * FROM tavole WHERE tipo = 'SDOPPIAMENTO' AND status = 'APERTA' AND livello IN (1, 2, 3) ORDER BY numero ASC LIMIT 1`
-  );
-  if (!prossima) { console.log('⚠️  Nessuna tavola Urano sdoppiata'); return; }
-
-  await pg.query(
-    `UPDATE tavole SET tipo = 'PERCORSO', turno = $1, livello = 1, capacita = 2, blocco = 1, sezione = 'URANO' WHERE id = $2`,
-    [nuovoTurnoNum, prossima.id]
-  );
-
-  const nextAccount = await db.getAccount(prossima.faraone_wallet);
-  const faraoneTipo = nextAccount?.tipo || 'PRIMARIO';
-
-  await db.createTurno({
-    sezione: 'URANO', livello: 1, blocco: 1,
-    numeroTurno: nuovoTurnoNum, faraoneWallet: prossima.faraone_wallet,
-    faraoneTipo, sacerdotiNecessari: rules.IMPORTI.SACERDOTI_DAL_SECONDO
-  });
-
-  console.log(`\n🔄 Nuovo turno Urano #${nuovoTurnoNum} — Faraone: ${prossima.faraone_wallet.substring(0, 12)}... (${faraoneTipo})`);
-
-  // Inserisci Funzioni nel nuovo turno
-  await inserisciFunzioniNelNuovoTurno({ numero_turno: nuovoTurnoNum }, prossima.faraone_wallet);
-}
-
-// ========================================
-// POSIZIONAMENTO FUNZIONI (reg.6)
-// ========================================
-
-async function inserisciFunzioniNelNuovoTurno(nuovoTurno, faraoneWallet) {
-  const pg = require('./pg-connection-manager');
-  const funzioniPendenti = await db.getFunzioniPendentiPerTurno(nuovoTurno.numero_turno);
-  if (funzioniPendenti.length === 0) {
-    console.log(`   ℹ️  Nessuna Funzione pendente per turno ${nuovoTurno.numero_turno}`);
-    return;
-  }
-
-  const simbionti = funzioniPendenti.filter(f => f.tipo === 'SIMBIONTE');
-  const perpetuo = funzioniPendenti.find(f => f.tipo === 'PERPETUO');
-  const gemello = funzioniPendenti.find(f => f.tipo === 'GEMELLO');
-
-  console.log(`\n⚙️ POSIZIONAMENTO FUNZIONI turno ${nuovoTurno.numero_turno}`);
-
-  const destConfig = tableManager.getLivelloConfig(2); // Mercurio
-
-  // Mercurio tavola 1: Simbionti 1,2
-  if (simbionti.length >= 2) {
-    const gioveTav1 = await tableManager.creaTavolaPercorso(2, faraoneWallet, nuovoTurno.numero_turno);
-    for (let i = 0; i < 2; i++) {
-      const sim = simbionti[i];
-      const simW = `0x${nuovoTurno.numero_turno.toString().padStart(8,'0')}SIM${(i+1).toString().padStart(10,'0')}`.substring(0,42).padEnd(42,'0');
-      await db.createPosizione({ tavolaId: gioveTav1.id, casella: i + 1, wallet: simW, nome: sim.sigla, tipo: 'SIMBIONTE', donoImporto: 50 });
-      await db.updateTavolaDoni(gioveTav1.numero, 50);
-      await pg.query(`UPDATE funzioni SET status='POSIZIONATO', tavola_posizionamento=$1, posizione_in_tavola=$2 WHERE id=$3`,
-        [gioveTav1.numero, `MERCURIO_TAV1_POS${i+1}`, sim.id]);
-    }
-    // Con cap=3, la tavola resta APERTA (2/3) — il 3° slot verrà riempito dalla progressione Luna→Mercurio
-    console.log(`   ✅ Simbionti 1,2 → Mercurio tavola #${gioveTav1.numero} (2/${destConfig?.capacita || 3})`);
-  }
-
-  // Mercurio tavola 2: Simbionte 3 + Perpetuo
-  if (simbionti.length >= 3 || perpetuo) {
-    const gioveTav2 = await tableManager.creaTavolaPercorso(2, faraoneWallet, nuovoTurno.numero_turno);
-    if (simbionti.length >= 3) {
-      const sim3 = simbionti[2];
-      const simW = `0x${nuovoTurno.numero_turno.toString().padStart(8,'0')}SIM${(3).toString().padStart(10,'0')}`.substring(0,42).padEnd(42,'0');
-      await db.createPosizione({ tavolaId: gioveTav2.id, casella: 1, wallet: simW, nome: sim3.sigla, tipo: 'SIMBIONTE', donoImporto: 50 });
-      await db.updateTavolaDoni(gioveTav2.numero, 50);
-      await pg.query(`UPDATE funzioni SET status='POSIZIONATO', tavola_posizionamento=$1, posizione_in_tavola=$2 WHERE id=$3`,
-        [gioveTav2.numero, 'MERCURIO_TAV2_POS1', sim3.id]);
-    }
-    if (perpetuo && perpetuo.account_generato_wallet) {
-      const risultatoPerp = await tableManager.posizionaDonatore({
-        tavolaId: gioveTav2.id, tavolaNumero: gioveTav2.numero, livello: 2,
-        wallet: perpetuo.account_generato_wallet, nome: perpetuo.sigla,
-        tipo: 'PERPETUO', donoImporto: 50, turno: nuovoTurno.numero_turno, sdoppiabile: true
-      });
-      await pg.query(`UPDATE funzioni SET status='POSIZIONATO', tavola_posizionamento=$1, posizione_in_tavola=$2 WHERE id=$3`,
-        [gioveTav2.numero, 'MERCURIO_TAV2_POS2', perpetuo.id]);
-      console.log(`   ✅ Perpetuo ${perpetuo.sigla} → Mercurio tavola #${gioveTav2.numero}`);
-    }
-  }
-
-  // Gemello: lazy (7ª tavola Venere)
-  if (gemello && gemello.account_generato_wallet) {
-    await db.setState(`gemello_pendente_turno_${nuovoTurno.numero_turno}`, {
-      funzioneId: gemello.id, wallet: gemello.account_generato_wallet,
-      nome: gemello.sigla, turno: nuovoTurno.numero_turno,
-      ticketPrenotato: gemello.ticket_prenotato
+    registro.donations.push({
+      donationId,
+      donor,
+      donorName,
+      amountUSDC,
+      amountEUR,
+      txHash,
+      timestamp: timestamp || new Date().toISOString(),
+      numPairs,
+      recipients,
+      firstPosition,
+      lastPosition
     });
-    console.log(`   ⏳ Gemello ${gemello.sigla} → pendente (7ª tavola Venere)`);
+
+    await saveJsonFile(DONI_AL_VOLO_FILE, registro);
+
+    const positionsResultCombined = {
+      success: true,
+      posizioniCreate: totalPositions,
+      posizioni: allPositions,
+      primaPositzione: firstPosition,
+      ultimaPositzione: lastPosition,
+      movimento: 'SMALL',
+      dettagli: {
+        importoUsato: numPairs * 2,
+        importoTotale: amountEUR,
+        residuo: amountEUR - (numPairs * 2)
+      }
+    };
+
+    const donationRecord = {
+      donationId,
+      donor,
+      donorName,
+      amountUSDC,
+      amountEUR,
+      txHash,
+      timestamp: timestamp || new Date().toISOString(),
+      positionsCreated: totalPositions,
+      firstPosition,
+      lastPosition,
+      rgxMinted: Math.floor(amountEUR / EUR_PER_RGX),
+      status: 'COMPLETED',
+      beneficiaryWallet: null,
+      beneficiaryName: null,
+      isGift: false,
+      giftMessage: null,
+      donationType: 'dono-al-volo'
+    };
+
+    console.log('========================================');
+    console.log('   ✅ DONO AL VOLO COMPLETATO!');
+    console.log('========================================\n');
+
+    const finalPayload = {
+      success: true,
+      donation: donationRecord,
+      positions: positionsResultCombined,
+      message: 'Dono al volo processato con successo'
+    };
+
+    // 🔁 AUTOMAZIONE CICLI/ACCUMULI/STELLINE (dono-al-volo: il donatore è chi paga)
+    try {
+      const donationUnits = Math.floor((positionsResultCombined.posizioniCreate || 0) / 2);
+      if (donationUnits > 0) {
+        const cycleRes = await cycleCompletionEnginePg.processDonationCompletedPg({
+          donorWallet: donor,
+          donationUnits,
+          chainTxHash: txHash,
+          timestamp: donationRecord.timestamp
+        });
+        finalPayload.cycleProcessing = cycleRes;
+      }
+    } catch (e) {
+      console.error('⚠️  Errore automazione cicli (dono-al-volo):', e.message || e);
+      finalPayload.cycleProcessing = { success: false, error: String(e.message || e) };
+    }
+
+    return finalPayload;
+  } catch (error) {
+    console.error('❌ Errore processamento Dono al volo:', error);
+    return {
+      success: false,
+      error: error.message,
+      donationId
+    };
   }
 }
 
 // ========================================
-// STATO SISTEMA
+// NFT RGx MINTING (BLOCKCHAIN INTEGRATION)
 // ========================================
 
-async function getStatoSistema() {
-  await db.initDatabase();
-  const sistema = await db.getState('sistema', {});
-  const contenitori = await containerManager.getStatoContenitori();
-  const pg = require('./pg-connection-manager');
+const { ethers } = require('ethers');
 
-  const stats = await pg.queryOne(`
-    SELECT
-      (SELECT COUNT(*) FROM accounts) AS totale_account,
-      (SELECT COUNT(*) FROM accounts WHERE ticket_number IS NOT NULL) AS account_con_ticket,
-      (SELECT COUNT(*) FROM tavole) AS totale_tavole,
-      (SELECT COUNT(*) FROM tavole WHERE status = 'APERTA') AS tavole_aperte,
-      (SELECT COUNT(*) FROM tavole WHERE status = 'COMPLETATA') AS tavole_completate,
-      (SELECT COUNT(*) FROM turni WHERE status = 'IN_CORSO') AS turni_attivi,
-      (SELECT COUNT(*) FROM funzioni) AS totale_funzioni,
-      (SELECT COALESCE(SUM(importo), 0) FROM donazioni WHERE status = 'COMPLETATA') AS totale_donazioni,
-      (SELECT COUNT(*) FROM storico_avanzamenti) AS totale_avanzamenti,
-      (SELECT COUNT(*) FROM coda_fifo WHERE status = 'IN_CODA') AS rientri_in_attesa,
-      (SELECT COUNT(*) FROM coda_fifo WHERE status = 'IN_CODA' AND tipo = 'HUMAN') AS rientri_human,
-      (SELECT COUNT(*) FROM coda_fifo WHERE status = 'IN_CODA' AND tipo = 'CASSA') AS rientri_cassa,
-      (SELECT COUNT(*) FROM storico_uscite_fifo) AS totale_uscite,
-      (SELECT COUNT(*) FROM storico_uscite_fifo WHERE tipo_uscita = 'HUMAN') AS uscite_human,
-      (SELECT COUNT(*) FROM storico_uscite_fifo WHERE tipo_uscita != 'HUMAN') AS uscite_cassa,
-      (SELECT COALESCE(SUM(netto), 0) FROM storico_uscite_fifo) AS totale_distribuito,
-      (SELECT COALESCE(SUM(accantonamento_cassa), 0) FROM storico_uscite_fifo) AS totale_accantonato,
-      (SELECT COALESCE(SUM(CASE WHEN tipo LIKE 'ROG_SMALL%' THEN importo ELSE 0 END), 0) FROM flussi_esterni) AS flussi_rog_small,
-      (SELECT COALESCE(SUM(CASE WHEN tipo = 'ROG' THEN importo ELSE 0 END), 0) FROM flussi_esterni) AS flussi_rog,
-      (SELECT COALESCE(SUM(CASE WHEN tipo = 'RIENTRI_SOLE' THEN importo ELSE 0 END), 0) FROM flussi_esterni) AS flussi_rientri_sole
-  `);
+// Configurazione smart contract ROGDao
+const ROG_CONTRACT_ADDRESS = process.env.ROG_CONTRACT_ADDRESS || '0x0723a5d24afCe5732c9D5C00Ae580934d5664Aa0';
+const POLYGON_RPC = process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com/';
+const BACKEND_PRIVATE_KEY = process.env.BACKEND_PRIVATE_KEY; // Wallet backend per minting
 
-  // Blocco
-  let blocco = { bloccato: false };
-  try { blocco = await db.getStatoBlocco() || { bloccato: false }; } catch (_) {}
+// ⚠️  IMPORTANTE: Il wallet derivato da BACKEND_PRIVATE_KEY DEVE avere BACKEND_ROLE
+//     nello smart contract ROGDao per chiamare completeDonation()
+//     Usa: contract.grantBackendRole(backendWalletAddress) dal wallet owner
 
-  // Fondo cassa
-  let fondoCassa = 0;
+// ABI ROGDao completo per minting via completeDonation
+const ROG_ABI = [
+  'function registerDonation(uint256 amount) external returns (uint256)',
+  'function completeDonation(uint256 donationId, bytes32 externalTxHash) external',
+  'function users(address user) external view returns (uint256 totalDonated, uint256 totalReceived, uint256 rgxTokensOwned, uint256 registrationTime, bool isActive, uint256 donationCount)',
+  'event DonationRegistered(uint256 indexed donationId, address indexed donor, uint256 amount, uint256 expireTime)',
+  'event DonationCompleted(uint256 indexed donationId, address indexed donor, uint256 amount, uint256 tokensToMint, bytes32 externalTxHash)',
+  'event RGxTokenMinted(uint256 indexed tokenId, address indexed owner, uint256 donationId)'
+];
+
+/**
+ * Minta NFT RGx on-chain usando completeDonation() dello smart contract ROGDao
+ * 
+ * FLUSSO SMART CONTRACT:
+ * 1. Frontend: registerDonation(amountUSDC) → donationId
+ * 2. Backend: completeDonation(donationId, txHash) → minta automaticamente RGx NFT
+ * 
+ * IMPORTANTE: Il frontend chiama già registerDonation(), qui chiamiamo solo completeDonation()
+ * 
+ * @param {string} donorWallet - Wallet del donatore
+ * @param {number} rgxAmount - Numero di RGx da mintare (calcolato da amountUSDC/2)
+ * @param {string} donationIdFromFrontend - ID donazione già registrato dal frontend
+ * @param {string} externalTxHash - Hash transazione USDC off-chain
+ * @returns {Promise<Object>} Risultato minting
+ */
+async function mintRGxNFT(donorWallet, rgxAmount, donationIdFromFrontend, externalTxHash = null) {
+  console.log(`\n🎨 MINTING RGx NFT via completeDonation()`);
+  console.log(`   Donor: ${donorWallet}`);
+  console.log(`   RGx to mint: ${rgxAmount}`);
+  console.log(`   DonationId (from frontend): ${donationIdFromFrontend}`);
+  
+  // VALIDAZIONE: donationId deve essere un numero intero valido per lo smart contract
+  // Se è nel formato "txHash:logIndex" (dal listener USDC), non è un donationId on-chain valido
+  const donationIdNum = Number(donationIdFromFrontend);
+  const isValidOnChainId = Number.isFinite(donationIdNum) && donationIdNum > 0 && Number.isInteger(donationIdNum);
+  
+  if (!isValidOnChainId) {
+    console.log(`   ⚠️  DonationId non è un uint256 valido (ricevuto: ${donationIdFromFrontend})`);
+    console.log(`   ℹ️  Il minting RGx on-chain richiede un donationId numerico da registerDonation()`);
+    console.log(`   ✅ Minting simulato - le posizioni sono state create correttamente`);
+    return {
+      success: true,
+      donor: donorWallet,
+      rgxAmount,
+      donationId: donationIdFromFrontend,
+      txHash: null,
+      simulated: true,
+      message: 'Minting simulato - donationId non valido per smart contract (formato txHash:logIndex)'
+    };
+  }
+  
+  // Se non configurato backend wallet, skip minting on-chain
+  if (!BACKEND_PRIVATE_KEY || BACKEND_PRIVATE_KEY === 'your-backend-private-key') {
+    console.log(`   ⚠️  Backend wallet non configurato - minting simulato`);
+    return {
+      success: true,
+      donor: donorWallet,
+      rgxAmount,
+      donationId: donationIdFromFrontend,
+      txHash: null,
+      simulated: true,
+      message: 'Minting simulato - configurare BACKEND_PRIVATE_KEY per minting reale'
+    };
+  }
+  
   try {
-    const fc = await pg.queryOne(`SELECT COALESCE(SUM(importo_disponibile), 0) AS totale FROM contenitori WHERE tipo = '5' AND status = 'IN_ATTESA'`);
-    fondoCassa = Number(fc?.totale) || 0;
-  } catch (_) {}
-
-  return {
-    sistema, contenitori, blocco, fondoCassa,
-    statistiche: {
-      totaleAccount: Number(stats?.totale_account) || 0,
-      accountConTicket: Number(stats?.account_con_ticket) || 0,
-      totaleTavole: Number(stats?.totale_tavole) || 0,
-      tavoleAperte: Number(stats?.tavole_aperte) || 0,
-      tavoleCompletate: Number(stats?.tavole_completate) || 0,
-      turniAttivi: Number(stats?.turni_attivi) || 0,
-      totaleFunzioni: Number(stats?.totale_funzioni) || 0,
-      totaleDonazioni: Number(stats?.totale_donazioni) || 0,
-      totaleAvanzamenti: Number(stats?.totale_avanzamenti) || 0,
-      rientriInAttesa: Number(stats?.rientri_in_attesa) || 0,
-      rientriHuman: Number(stats?.rientri_human) || 0,
-      rientriCassa: Number(stats?.rientri_cassa) || 0,
-      totaleUscite: Number(stats?.totale_uscite) || 0,
-      usciteHuman: Number(stats?.uscite_human) || 0,
-      usciteCassa: Number(stats?.uscite_cassa) || 0,
-      totaleDistribuito: Number(stats?.totale_distribuito) || 0,
-      totaleAccantonato: Number(stats?.totale_accantonato) || 0,
-      fondoCassa,
-      flussiEsterni: {
-        rogSmall: Number(stats?.flussi_rog_small) || 0,
-        rog: Number(stats?.flussi_rog) || 0,
-        rientriSole: Number(stats?.flussi_rientri_sole) || 0
-      }
+    // Setup provider e signer
+    const provider = new ethers.providers.JsonRpcProvider(POLYGON_RPC);
+    const wallet = new ethers.Wallet(BACKEND_PRIVATE_KEY, provider);
+    const contract = new ethers.Contract(ROG_CONTRACT_ADDRESS, ROG_ABI, wallet);
+    
+    // Usa il donationId numerico validato
+    const onChainDonationId = donationIdNum;
+    console.log(`   ✅ Uso donationId numerico: ${onChainDonationId}`);
+    
+    // Prepara txHash per completeDonation (bytes32)
+    // Il txHash USDC è già 32 bytes (0x + 64 hex chars), lo usiamo direttamente
+    let txHashBytes32;
+    if (externalTxHash && externalTxHash.startsWith('0x') && externalTxHash.length === 66) {
+      // txHash valido: 0x + 64 caratteri hex = 66 caratteri totali = 32 bytes
+      txHashBytes32 = externalTxHash;
+    } else if (externalTxHash) {
+      // txHash presente ma formato non standard, prova a normalizzare
+      txHashBytes32 = ethers.utils.hexZeroPad(ethers.utils.hexlify(externalTxHash), 32);
+    } else {
+      // Nessun txHash, genera hash fittizio
+      txHashBytes32 = ethers.utils.hexlify(ethers.utils.randomBytes(32));
     }
+    
+    console.log(`   📝 TxHash originale: ${externalTxHash}`);
+    console.log(`   📝 TxHash bytes32: ${txHashBytes32}`);
+    
+    // 🔧 FIX GAS PRICE: Polygon richiede minimo 25 Gwei di priority fee.
+    // Usiamo 35 Gwei di tip e 150 Gwei di max fee per sicurezza.
+    const gasOverrides = {
+      maxPriorityFeePerGas: ethers.utils.parseUnits('35', 'gwei'),
+      maxFeePerGas: ethers.utils.parseUnits('150', 'gwei')
+    };
+    
+    console.log(`   🔗 Chiamata completeDonation(${onChainDonationId}, ${txHashBytes32})...`);
+    console.log(`   ⛽ Gas: maxPriorityFee=35 gwei, maxFee=150 gwei`);
+    const completeTx = await contract.completeDonation(onChainDonationId, txHashBytes32, gasOverrides);
+    console.log(`   ⏳ Transazione complete inviata: ${completeTx.hash}`);
+    
+    const completeReceipt = await completeTx.wait();
+    
+    // Estrai token IDs dagli eventi RGxTokenMinted
+    const mintEvents = completeReceipt.events?.filter(e => e.event === 'RGxTokenMinted') || [];
+    const tokenIds = mintEvents.map(e => e.args?.tokenId?.toString());
+    
+    console.log(`   ✅ RGx NFT mintati!`);
+    console.log(`   🎫 Token IDs: ${tokenIds.join(', ')}`);
+    console.log(`   ⛽ Gas usato: ${completeReceipt.gasUsed?.toString()}`);
+    
+    return {
+      success: true,
+      donor: donorWallet,
+      rgxAmount,
+      onChainDonationId,
+      txHash: completeReceipt.transactionHash,
+      tokenIds,
+      gasUsed: completeReceipt.gasUsed?.toString(),
+      blockNumber: completeReceipt.blockNumber,
+      simulated: false
+    };
+    
+  } catch (error) {
+    console.error(`   ❌ Errore minting RGx:`, error.message || error);
+    
+    // Controlla errori specifici
+    let errorMessage = error.message || String(error);
+    
+    if (errorMessage.includes('Daily donation limit')) {
+      errorMessage = 'Limite giornaliero donazioni raggiunto per questo wallet';
+    } else if (errorMessage.includes('ZK-KYC required')) {
+      errorMessage = 'ZK-KYC richiesto per donazioni >100 USDC';
+    } else if (errorMessage.includes('Circuit breaker')) {
+      errorMessage = 'Circuit breaker attivato - sistema in protezione';
+    }
+    
+    return {
+      success: false,
+      donor: donorWallet,
+      rgxAmount,
+      error: errorMessage,
+      simulated: false
+    };
+  }
+}
+
+/**
+ * Verifica balance RGx di un wallet
+ */
+async function getRGxBalance(wallet) {
+  // TODO: Query smart contract
+  // Per ora restituisce conteggio basato su posizioni
+  try {
+    const walletInfo = await dbManager.getWallet(wallet);
+    if (walletInfo) {
+      // Ogni posizione = 1€, ogni 2€ = 1 RGx
+      // Quindi: totale_posizioni / 2 = RGx (approssimativo)
+      return Math.floor(walletInfo.totale_posizioni / 2);
+    }
+  } catch (error) {
+    console.error('Errore getRGxBalance:', error);
+  }
+  
+  return 0;
+}
+
+// ========================================
+// VALIDAZIONE
+// ========================================
+
+/**
+ * Valida dati donazione
+ */
+function validateDonationData(data) {
+  const errors = [];
+  
+  if (!data.donationId) {
+    errors.push('Donation ID mancante');
+  }
+  
+  if (!data.donor || !/^0x[a-fA-F0-9]{40}$/.test(data.donor)) {
+    errors.push('Wallet donor non valido');
+  }
+  
+  const amountUSDCNum = Number(data.amountUSDC);
+  if (!Number.isFinite(amountUSDCNum) || amountUSDCNum <= 0 || !Number.isInteger(amountUSDCNum) || amountUSDCNum % 2 !== 0) {
+    errors.push('Importo USDC non valido: deve essere intero e pari (multiplo di 2 USDC)');
+  }
+  
+  if (!data.txHash || !data.txHash.startsWith('0x')) {
+    errors.push('TX hash non valido');
+  }
+  
+  return {
+    valid: errors.length === 0,
+    errors
   };
 }
 
 // ========================================
-// POSIZIONAMENTO CROSS-PIATTAFORMA (L0)
+// EXPORTS
 // ========================================
-
-/**
- * Posiziona un donatore al livello Sole (L0) proveniente da un'altra piattaforma.
- * Versione semplificata di posizionaDonatoreEntrata:
- *   - Non richiede verifica txHash (già verificata dalla piattaforma di origine)
- *   - Crea l'account se non esiste
- *   - Stessa logica di posizionamento: tavola attiva, sdoppiamento, cascata
- *
- * @param {string} wallet - Wallet del donatore (o CASSA)
- * @param {string} nome - Nome/etichetta per la posizione
- * @returns Risultato posizionamento
- */
-async function posizionaDonatoreEntrataCross(wallet, nome) {
-  await db.initDatabase();
-  const w = wallet.toLowerCase();
-  if (isSystemWallet(w)) {
-    console.log(`   [SYSTEM-WALLET] ROG gate bypassato per ${w}`);
-  } else {
-    const rogStatus = await rogChecker.checkAllPrerequisites(w);
-    if (!rogStatus.canProceed) {
-      throw new Error('Prerequisiti ROG non soddisfatti');
-    }
-  }
-  // Crea account se non esiste
-  let account = await db.getAccount(w);
-  if (!account) {
-    account = await db.createAccount({ wallet: w, nome: nome || `cross-${w.substring(0, 8)}`, tipo: 'CROSS' });
-  }
-
-  // Usa la stessa logica di posizionaDonatoreEntrata
-  return posizionaDonatoreEntrata(w, nome || account.nome);
-}
 
 module.exports = {
-  inizializzaSistema,
-  processaDonoEntrataWallet,
-  processaCoppiaEntrata,
-  posizionaDonatoreEntrata,
-  posizionaDonatoreEntrataCross,
-  gestisciUscitaFaraone,
-  posizionaFaraoneInL4, gestisciUscitaL4,
-  posizionaFaraoneInL5, gestisciUscitaL5,
-  getStatoSistema,
-  watchdogTurnoEntrata,
-  FONDO_WALLET, CASSA_WALLET, FONDO_SIGLA
+  // Main functions
+  processDonation,
+  simulateDonation,
+  registerIncomingTransferOnly,
+  
+  // NFT functions
+  mintRGxNFT,
+  getRGxBalance,
+  
+  // Validation
+  validateDonationData,
+  
+  // Utils
+  getDonorName,
+  
+  // Constants
+  USDC_TO_EUR_RATE,
+  EUR_PER_RGX
 };

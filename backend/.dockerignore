@@ -1,10 +1,7 @@
 node_modules
-npm-debug.log*
 .git
-.gitignore
 .env
-.env.*
 env.txt
 *.md
 .DS_Store
-railway.json
+._*

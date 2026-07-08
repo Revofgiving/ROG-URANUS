@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "id": "ROG_KYC_Schema_v1",
+  "title": "ROG KYC Verification Schema",
+  "description": "Schema PolygonID per verifica identità utenti ROG - Privacy-first design (PUNTI 126-130)",
+  "version": "1.0.0",
+  "type": "object",
+  "required": ["kycVerified", "ageOver18"],
+  "properties": {
+    "kycVerified": {
+      "type": "boolean",
+      "description": "Indica se l'utente ha completato la verifica KYC"
+    },
+    "ageOver18": {
+      "type": "boolean",
+      "description": "Conferma che l'utente ha più di 18 anni"
+    },
+    "countryCode": {
+      "type": "string",
+      "description": "Codice paese ISO 3166-1 alpha-2 (opzionale, per compliance)",
+      "pattern": "^[A-Z]{2}$"
+    },
+    "verificationLevel": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3,
+      "description": "Livello di verifica: 1=Base, 2=Enhanced, 3=Full"
+    },
+    "issuerTrust": {
+      "type": "string",
+      "enum": ["TRUSTED", "VERIFIED", "STANDARD"],
+      "description": "Livello di fiducia dell'issuer che ha emesso la credenziale"
+    }
+  },
+  "trustedIssuers": [
+    {
+      "id": "did:polygonid:polygon:main:ROG_OFFICIAL_ISSUER",
+      "name": "ROG Official Issuer",
+      "trustLevel": "TRUSTED"
+    },
+    {
+      "id": "did:polygonid:polygon:main:POLYGON_ID_ISSUER",
+      "name": "PolygonID Official",
+      "trustLevel": "TRUSTED"
+    },
+    {
+      "id": "did:polygonid:polygon:main:WORLDCOIN_ISSUER",
+      "name": "Worldcoin Proof of Personhood",
+      "trustLevel": "VERIFIED"
+    }
+  ],
+  "credentialExpiry": {
+    "days": 365,
+    "description": "Validità credenziale: 1 anno (Punto 117)"
+  },
+  "privacyPolicy": {
+    "dataRetention": "NONE",
+    "personalDataStored": false,
+    "description": "Privacy by design - Nessun dato personale memorizzato (Punto 151)"
+  },
+  "smartContractIntegration": {
+    "verifierContract": "ROGZKVerifier.sol",
+    "method": "verifyZKKYCHybrid",
+    "chainId": 137,
+    "network": "Polygon Mainnet"
+  },
+  "userFlow": {
+    "step1": "User dona >100USDC → Sistema controlla KYC automaticamente (Punto 142)",
+    "step2": "Se serve KYC → Mostra QR code PolygonID (Punto 143)",
+    "step3": "User scansiona → PolygonID app genera ZK proof (Punto 144)",
+    "step4": "Proof verificato → User può donare senza limiti (Punto 145)",
+    "step5": "Privacy totale → Nessun dato personale memorizzato (Punto 146)"
+  }
+}

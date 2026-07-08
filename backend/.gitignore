@@ -1,0 +1,12 @@
+.DS_Store
+._*
+.env
+env.txt
+node_modules/
+data/
+database/*.db
+database/*.bak
+database/*.bak2
+
+# Script di debug, fix, migrazione e utility (spostati in scripts/)
+scripts/
