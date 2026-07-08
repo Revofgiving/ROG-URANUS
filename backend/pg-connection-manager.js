@@ -171,13 +171,27 @@ async function ensureCoreSchema() {
     CREATE INDEX IF NOT EXISTS idx_uranus_bridge_wallet
       ON uranus_bridge_events (LOWER(wallet_beneficiario));
 
-    -- INDICI PERFORMANCE per query area personale (user-positions, user-invitati)
-    -- Questi indici sono CRITICI per evitare rallentamenti di 10+ minuti
-    CREATE INDEX IF NOT EXISTS idx_wallet_positions_wallet
-      ON wallet_positions (wallet);
+    -- VIEW POSIZIONI (wallet_positions è una VIEW, non una tabella)
+    CREATE OR REPLACE VIEW wallet_positions AS
+    SELECT
+      wallet,
+      numero_posizione AS posizione,
+      id AS posizione_id,
+      tipo,
+      tavola_id,
+      casella,
+      nome,
+      status,
+      dono_importo,
+      created_at
+    FROM posizioni;
     
-    CREATE INDEX IF NOT EXISTS idx_wallet_positions_posizione
-      ON wallet_positions (posizione);
+    -- INDICI PERFORMANCE su posizioni (tabella reale)
+    CREATE INDEX IF NOT EXISTS idx_posizioni_wallet
+      ON posizioni (wallet);
+    
+    CREATE INDEX IF NOT EXISTS idx_posizioni_numero_posizione
+      ON posizioni (numero_posizione);
     
     CREATE INDEX IF NOT EXISTS idx_anagrafica_invitati_invitante
       ON anagrafica_invitati (invitante_wallet);
