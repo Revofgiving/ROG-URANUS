@@ -27,6 +27,7 @@ const path = require('path');
 // File di anagrafica unico e definitivo (anagrafica posizioni) - LEGACY, backup only
 const ANAGRAFICA_FILE = path.join(__dirname, 'database', 'ROG_ANAGRAFICA_DEFINITIVA.txt');
 // PostgreSQL è l'unica fonte di verità per gli invitati (tabella anagrafica_invitati)
+const INVITI_ENABLED = false; // URANUS non usa inviti
 
 // Wallet entità speciali
 const SPECIAL_WALLETS = {
@@ -519,6 +520,9 @@ async function aggiornaAnagraficaFile(posizioni) {
  */
 async function scriviInvitiPerPosizioni(mapping) {
   try {
+    if (!INVITI_ENABLED) {
+      return;
+    }
     if (!Array.isArray(mapping) || mapping.length === 0) {
       return;
     }

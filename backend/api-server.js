@@ -60,6 +60,7 @@ const galleryAPI = require('./gallery-api-local');
 const maintenanceManager = require('./maintenance-manager');
 const reportGenerator = require('./src/26-pannello-controllo/report-generator');
 const pendingDonationStore = require('./pending-donation-store');
+const INVITI_ENABLED = false; // URANUS non usa inviti
 
 // In modalità PostgreSQL-only non usiamo più SQLite a runtime.
 // Se manca DATABASE_URL, consideriamo la configurazione non valida.
@@ -732,6 +733,9 @@ function findWalletInAnagraficaFile(walletLower, maxResults = 50) {
  * Ottiene invitanti per posizioni da PostgreSQL (unica fonte di verità)
  */
 async function getInvitanteForPositions(posizioni) {
+  if (!INVITI_ENABLED) {
+    return {};
+  }
   const out = {};
   if (!Array.isArray(posizioni) || posizioni.length === 0) return out;
 
@@ -2587,6 +2591,16 @@ app.get('/api/user-invitati/:wallet', async (req, res) => {
     const { wallet } = req.params;
     if (!wallet) {
       return res.status(400).json({ success: false, message: 'Wallet richiesto' });
+    }
+    if (!INVITI_ENABLED) {
+      return res.json({
+        success: true,
+        totaleInvitati: 0,
+        numeroInvitati: 0,
+        invitati: [],
+        invitatiLARGE: 0,
+        invitatiSMALL: 0
+      });
     }
 
     // AREA PERSONALE: mostra TUTTI gli invitati (persone + rientri SELF)
@@ -4979,6 +4993,9 @@ app.post('/api/admin/fix-molecole-17648-17656', adminAuthMiddleware, async (req,
 // ============================================
 app.post('/api/admin/fix-invitati-17680', adminAuthMiddleware, async (req, res) => {
   try {
+    if (!INVITI_ENABLED) {
+      return res.status(410).json({ success: false, message: 'Inviti disabilitati su URANUS' });
+    }
     const ANNA = '0xbe17ce579328fcdb3213ba98957c95b4d9fce6a0';
     const PASQUALE = '0x4f1b12c9d4182d55d23b87a2dd451ec0618eb17e';
     const POSITIONS = [17680,17682,17684,17686,17688,17690,17692,17694,17696,17698];
@@ -5007,6 +5024,9 @@ app.post('/api/admin/fix-invitati-17680', adminAuthMiddleware, async (req, res) 
 // FIX: Inserisci invitati mancanti 17686-17698 per Anna
 app.post('/api/admin/fix-invitati-17686-missing', adminAuthMiddleware, async (req, res) => {
   try {
+    if (!INVITI_ENABLED) {
+      return res.status(410).json({ success: false, message: 'Inviti disabilitati su URANUS' });
+    }
     const ANNA = '0xbe17ce579328fcdb3213ba98957c95b4d9fce6a0';
     const MISSING = [17686,17688,17690,17692,17694,17696,17698];
     const APPLY = req.body?.apply === true;

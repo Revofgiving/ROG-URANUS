@@ -193,11 +193,6 @@ async function ensureCoreSchema() {
     CREATE INDEX IF NOT EXISTS idx_posizioni_numero_posizione
       ON posizioni (numero_posizione);
     
-    CREATE INDEX IF NOT EXISTS idx_anagrafica_invitati_invitante
-      ON anagrafica_invitati (invitante_wallet);
-    
-    CREATE INDEX IF NOT EXISTS idx_anagrafica_invitati_pos
-      ON anagrafica_invitati (invitato_pos);
   `;
 
   await query(coreSql);

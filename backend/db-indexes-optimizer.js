@@ -10,56 +10,27 @@
  */
 
 const pg = require('./pg-connection-manager');
+const INVITI_ENABLED = false; // URANUS non usa inviti
 
 // ============================================
 // INDICI CRITICI PER PERFORMANCE
 // ============================================
 
 const CRITICAL_INDEXES = [
-  // ========== ANAGRAFICA_INVITATI ==========
-  // Query: WHERE invitante_wallet = $1 (getInvitati)
+  // ========== POSIZIONI ==========
+  // Query: WHERE wallet = $1 (lookup posizioni)
   {
-    name: 'idx_anagrafica_invitati_invitante_wallet',
-    table: 'anagrafica_invitati',
-    sql: `CREATE INDEX IF NOT EXISTS idx_anagrafica_invitati_invitante_wallet 
-          ON anagrafica_invitati(invitante_wallet)`
+    name: 'idx_posizioni_wallet',
+    table: 'posizioni',
+    sql: `CREATE INDEX IF NOT EXISTS idx_posizioni_wallet 
+          ON posizioni(wallet)`
   },
-  // Query: JOIN ON invitato_pos (getInvitati, getInvitanteDiretto)
+  // Query: ORDER BY numero_posizione
   {
-    name: 'idx_anagrafica_invitati_invitato_pos',
-    table: 'anagrafica_invitati',
-    sql: `CREATE INDEX IF NOT EXISTS idx_anagrafica_invitati_invitato_pos 
-          ON anagrafica_invitati(invitato_pos)`
-  },
-  // Query: WHERE invitante_wallet = invitato_wallet (auto-inviti SELF)
-  {
-    name: 'idx_anagrafica_invitati_self',
-    table: 'anagrafica_invitati',
-    sql: `CREATE INDEX IF NOT EXISTS idx_anagrafica_invitati_self 
-          ON anagrafica_invitati(invitante_wallet, invitato_wallet)`
-  },
-
-  // ========== WALLET_POSITIONS ==========
-  // Query: WHERE wallet = $1 (getWalletPositions - più usata!)
-  {
-    name: 'idx_wallet_positions_wallet',
-    table: 'wallet_positions',
-    sql: `CREATE INDEX IF NOT EXISTS idx_wallet_positions_wallet 
-          ON wallet_positions(wallet)`
-  },
-  // Query: JOIN ON posizione, ORDER BY posizione
-  {
-    name: 'idx_wallet_positions_posizione',
-    table: 'wallet_positions',
-    sql: `CREATE INDEX IF NOT EXISTS idx_wallet_positions_posizione 
-          ON wallet_positions(posizione)`
-  },
-  // Query: WHERE wallet = $1 AND movimento = $2 (filtri area personale)
-  {
-    name: 'idx_wallet_positions_wallet_movimento',
-    table: 'wallet_positions',
-    sql: `CREATE INDEX IF NOT EXISTS idx_wallet_positions_wallet_movimento 
-          ON wallet_positions(wallet, movimento)`
+    name: 'idx_posizioni_numero_posizione',
+    table: 'posizioni',
+    sql: `CREATE INDEX IF NOT EXISTS idx_posizioni_numero_posizione 
+          ON posizioni(numero_posizione)`
   },
 
   // ========== WALLET_MASTER ==========
@@ -144,8 +115,7 @@ async function analyzeAllTables() {
   console.log('\n📈 ANALYZE tabelle per query planner...');
 
   const tables = [
-    'anagrafica_invitati',
-    'wallet_positions', 
+    'posizioni',
     'wallet_master',
     'cassa_stato',
     'transazioni'
@@ -173,8 +143,7 @@ async function showStats() {
   try {
     const stats = await pool.query(`
       SELECT 
-        (SELECT COUNT(*) FROM wallet_positions) as posizioni,
-        (SELECT COUNT(*) FROM anagrafica_invitati) as invitati,
+        (SELECT COUNT(*) FROM posizioni) as posizioni,
         (SELECT COUNT(*) FROM wallet_master) as utenti,
         (SELECT COUNT(*) FROM cassa_stato) as conti_cassa
     `);
@@ -182,7 +151,6 @@ async function showStats() {
     const s = stats.rows[0];
     console.log(`  👥 Utenti:     ${Number(s.utenti).toLocaleString()}`);
     console.log(`  📍 Posizioni:  ${Number(s.posizioni).toLocaleString()}`);
-    console.log(`  🔗 Invitati:   ${Number(s.invitati).toLocaleString()}`);
     console.log(`  💰 Conti:      ${Number(s.conti_cassa).toLocaleString()}`);
 
     // Stima scalabilità
@@ -205,27 +173,9 @@ async function benchmarkQueries(testWallet) {
 
   const queries = [
     {
-      name: 'getWalletPositions',
-      sql: `SELECT * FROM wallet_positions WHERE wallet = $1`,
+      name: 'getPosizioniByWallet',
+      sql: `SELECT * FROM posizioni WHERE wallet = $1`,
       params: [testWallet]
-    },
-    {
-      name: 'getInvitati',
-      sql: `SELECT ai.invitato_pos, wp.movimento, wm.nome, wp.wallet
-            FROM anagrafica_invitati ai
-            LEFT JOIN wallet_positions wp ON wp.posizione = ai.invitato_pos
-            LEFT JOIN wallet_master wm ON wm.wallet = wp.wallet
-            WHERE ai.invitante_wallet = $1`,
-      params: [testWallet]
-    },
-    {
-      name: 'countInvitatiGrouped',
-      sql: `SELECT invitante_wallet, COUNT(*) as total
-            FROM anagrafica_invitati
-            WHERE invitante_wallet IS NOT NULL
-            GROUP BY invitante_wallet
-            LIMIT 1000`,
-      params: []
     }
   ];
 

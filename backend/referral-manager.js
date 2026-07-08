@@ -25,6 +25,7 @@ const pg = require('./pg-connection-manager');
 // ========================================
 
 const REFERRAL_DATA_FILE = path.join(__dirname, 'data', 'referral-state.json');
+const INVITI_ENABLED = false; // URANUS non usa inviti
 
 // ========================================
 // CLASSE PRINCIPALE
@@ -48,6 +49,14 @@ class ReferralManager {
     if (this.initialized) return;
 
     console.log('🔗 Inizializzazione Referral Manager...');
+    if (!INVITI_ENABLED) {
+      this.anagraficaInvitati = [];
+      this.referralState.invitatiPerWallet = {};
+      this.referralState.invitatiSelfPerWallet = {};
+      this.initialized = true;
+      console.log('ℹ️  Referral Manager disabilitato (URANUS non usa inviti)');
+      return;
+    }
 
     // Carica invitati da PostgreSQL (unica fonte di verità)
     await this.loadInvitatiFromPostgres();
@@ -65,6 +74,12 @@ class ReferralManager {
    * Questo metodo ora carica solo i CONTEGGI aggregati (leggeri).
    */
   async loadInvitatiFromPostgres() {
+    if (!INVITI_ENABLED) {
+      this.anagraficaInvitati = [];
+      this.referralState.invitatiPerWallet = {};
+      this.referralState.invitatiSelfPerWallet = {};
+      return;
+    }
     try {
       const pool = pg.getPool();
       
@@ -168,6 +183,7 @@ class ReferralManager {
    */
   async contaInvitati(wallet) {
     await this.init();
+    if (!INVITI_ENABLED) return 0;
 
     const walletNormalized = wallet.toLowerCase();
     
@@ -192,6 +208,7 @@ class ReferralManager {
    */
   async getInvitati(wallet, options = {}) {
     await this.init();
+    if (!INVITI_ENABLED) return [];
 
     const walletNorm = wallet.toLowerCase();
     const { onlySelf = false } = options;
@@ -268,6 +285,7 @@ class ReferralManager {
    */
   async getInvitanteDiretto(walletInvitato) {
     await this.init();
+    if (!INVITI_ENABLED) return null;
 
     const walletInvitatoNorm = walletInvitato.toLowerCase();
 
@@ -323,6 +341,11 @@ class ReferralManager {
    */
   async generaReferralLink(wallet) {
     await this.init();
+    if (!INVITI_ENABLED) {
+      const walletNormalized = wallet.toLowerCase();
+      const BASE_URL = process.env.BASE_URL || 'https://revolutionofgiving.com';
+      return `${BASE_URL}/referral.html?refWallet=${walletNormalized}`;
+    }
 
     const walletNormalized = wallet.toLowerCase();
 
@@ -354,6 +377,9 @@ class ReferralManager {
    */
   async registraInvito(params, options = {}) {
     await this.init();
+    if (!INVITI_ENABLED) {
+      return;
+    }
 
     const { skipReload = false } = options;
     const { walletInvitato, walletInvitante, nomeInvitante } = params;
@@ -400,6 +426,18 @@ class ReferralManager {
    */
   async getStatisticheInviti(wallet, options = {}) {
     await this.init();
+    if (!INVITI_ENABLED) {
+      return {
+        wallet: wallet.toLowerCase(),
+        numeroInvitati: 0,
+        classificazione: 'NON_INVITANTE',
+        invitati: [],
+        invitanteDiretto: null,
+        referralLink: await this.generaReferralLink(wallet),
+        invitatiLARGE: 0,
+        invitatiSMALL: 0
+      };
+    }
 
     const walletNorm = wallet.toLowerCase();
     const { onlySelf = false } = options;
@@ -476,6 +514,13 @@ class ReferralManager {
    * FORCE RELOAD: resetta cache per garantire sincronizzazione immediata
    */
   async reload() {
+    if (!INVITI_ENABLED) {
+      this.initialized = true;
+      this.anagraficaInvitati = [];
+      this.referralState.invitatiPerWallet = {};
+      this.referralState.invitatiSelfPerWallet = {};
+      return;
+    }
     console.log('🔄 Ricaricamento INVITATI da PostgreSQL (FORCE)...');
     
     // Reset inizializzazione per forzare ricarica completa
