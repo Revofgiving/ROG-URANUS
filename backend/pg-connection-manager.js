@@ -1,127 +1,419 @@
 /**
- * 🐘 URANO v2 — PostgreSQL Connection Manager
- *
- * Pool di connessioni PostgreSQL condiviso da tutti i moduli.
+ * 🐘 ROG POSTGRESQL CONNECTION MANAGER
+ * 
+ * Gestisce pool di connessioni PostgreSQL su Coolify
+ * Supporta sia DATABASE_URL che variabili separate
+ * 
+ * @author Warp AI Agent
+ * @version 1.0.0
+ * @date 30 Novembre 2025
  */
 
-const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 const { Pool } = require('pg');
-const { AsyncLocalStorage } = require('async_hooks');
+
+// ========================================
+// CONFIGURAZIONE
+// ========================================
 
 let pool = null;
-// Contesto transazione: se attivo, contiene il client dedicato alla transazione corrente.
-const txStorage = new AsyncLocalStorage();
+let isInitialized = false;
+let isSchemaEnsured = false;
 
-function currentTxClient() {
-  const store = txStorage.getStore();
-  return (store && store.client) || null;
+/**
+ * Crea e configura pool PostgreSQL
+ * @returns {Pool} Pool di connessioni
+ */
+function createPool() {
+  if (pool) return pool;
+
+  // Coolify fornisce DATABASE_URL automaticamente (host interno del progetto).
+  // SSL: di default TLS permissivo (il Postgres gestito su Coolify accetta TLS,
+  // come confermato in produzione); solo localhost senza TLS.
+  // Override esplicito con DATABASE_SSL / PGSSLMODE = require | disable.
+  function computeSslForUrl(connectionString) {
+    const mode = (process.env.PGSSLMODE || process.env.DATABASE_SSL || '').toLowerCase();
+    if (mode === 'disable') return false;
+    if (mode === 'require') return { rejectUnauthorized: false };
+
+    try {
+      const u = new URL(connectionString);
+      const host = (u.hostname || '').toLowerCase();
+
+      // Solo loopback locale senza TLS
+      if (host === 'localhost' || host === '127.0.0.1') {
+        return false;
+      }
+
+      // Ogni altro host (incl. host interno Coolify): TLS permissivo
+      return { rejectUnauthorized: false };
+    } catch (e) {
+      // Se non riusciamo a parsare, fallback: in produzione usa SSL
+      return process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false;
+    }
+  }
+
+  // 🔧 DATABASE_URL ha priorità: su Coolify è l'host interno del progetto ed è sempre corretto.
+  const connectionString = process.env.DATABASE_URL || process.env.DATABASE_PUBLIC_URL;
+
+  const config = connectionString
+    ? {
+        connectionString,
+        ssl: computeSslForUrl(connectionString)
+      }
+    : {
+        host: process.env.PGHOST || 'localhost',
+        port: parseInt(process.env.PGPORT || '5432'),
+        user: process.env.PGUSER || 'postgres',
+        password: process.env.PGPASSWORD || '',
+        database: process.env.PGDATABASE || 'rog_db',
+        // Se si usano variabili separate, assumiamo che sia networking interno; abilita SSL solo se forzato.
+        ssl: ((process.env.PGSSLMODE || '').toLowerCase() === 'require' || (process.env.DATABASE_SSL || '').toLowerCase() === 'require')
+          ? { rejectUnauthorized: false }
+          : false
+      };
+
+  pool = new Pool({
+    ...config,
+
+    // Pool ottimizzato per alta concorrenza (milioni di utenti)
+    // Aumentato da 5 a 50 per gestire traffico elevato
+    max: parseInt(process.env.PGPOOL_MAX || '50', 10),
+    min: parseInt(process.env.PGPOOL_MIN || '5', 10),
+    idleTimeoutMillis: parseInt(process.env.PGPOOL_IDLE_TIMEOUT_MS || '30000', 10),
+    connectionTimeoutMillis: parseInt(process.env.PGPOOL_CONNECTION_TIMEOUT_MS || '10000', 10),
+
+    // Migliora stabilità su connessioni lunghe/NAT
+    keepAlive: true,
+    keepAliveInitialDelayMillis: parseInt(process.env.PGPOOL_KEEPALIVE_DELAY_MS || '10000', 10),
+    
+    // Ottimizzazioni per performance
+    allowExitOnIdle: false,
+    statement_timeout: parseInt(process.env.PGPOOL_STATEMENT_TIMEOUT || '30000', 10)
+  });
+
+  // Event handlers per debugging
+  pool.on('connect', () => {
+    console.log('🐘 PostgreSQL: nuova connessione al pool');
+  });
+
+  pool.on('error', (err) => {
+    // Errori tipici: connessione idle terminata dal server.
+    // pg-pool gestisce AUTOMATICAMENTE la riconnessione — NON chiamare closePool() qui,
+    // altrimenti tutte le query in corso ricevono "Cannot use a pool after calling end".
+    console.error('❌ PostgreSQL pool error (idle client, auto-recover):', err.message);
+  });
+
+  console.log('✅ PostgreSQL pool creato');
+  return pool;
 }
 
+/**
+ * Inizializza connessione e verifica database
+ */
+async function ensureCoreSchema() {
+  if (isSchemaEnsured) return;
+
+  // NOTA: operazioni idempotenti (CREATE IF NOT EXISTS)
+  const coreSql = `
+    CREATE TABLE IF NOT EXISTS donations (
+      id BIGSERIAL PRIMARY KEY,
+      donation_id TEXT,
+      tx_hash TEXT NOT NULL,
+      log_index INTEGER NOT NULL DEFAULT 0,
+      donor_wallet TEXT NOT NULL,
+      beneficiary_wallet TEXT,
+      donation_type TEXT NOT NULL DEFAULT 'standard',
+      amount_usdc NUMERIC(18, 6) NOT NULL,
+      ts TIMESTAMPTZ,
+      positions_created INTEGER,
+      first_position INTEGER,
+      last_position INTEGER,
+      payload JSONB,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_donations_tx_log
+      ON donations (tx_hash, log_index);
+
+    CREATE INDEX IF NOT EXISTS idx_donations_donor
+      ON donations (donor_wallet);
+
+    CREATE INDEX IF NOT EXISTS idx_donations_beneficiary
+      ON donations (beneficiary_wallet);
+
+    -- Tabella coda FIFO per Dono al Volo
+    -- Wallet segnalati dagli admin che non possono permettersi l'ingresso
+    CREATE TABLE IF NOT EXISTS dono_al_volo_queue (
+      id BIGSERIAL PRIMARY KEY,
+      wallet_address TEXT NOT NULL,
+      nome TEXT,
+      segnalato_da TEXT,
+      note TEXT,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      used_at TIMESTAMPTZ,
+      used_by_donation_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dono_al_volo_queue_status
+      ON dono_al_volo_queue (status);
+
+    CREATE INDEX IF NOT EXISTS idx_dono_al_volo_queue_wallet
+      ON dono_al_volo_queue (LOWER(wallet_address));
+
+    -- 🎁 INTENTI CARTA REGALO (durevoli, anti-perdita)
+    -- Registriamo l'intento del regalo (donatore, beneficiario, importo) in modo
+    -- PERSISTENTE prima/durante il pagamento, così il legame col beneficiario
+    -- sopravvive a riavvii del backend e alla chiusura del browser.
+    -- Il gift-reconciler completa gli intenti PENDING con tx_hash reale.
+    CREATE TABLE IF NOT EXISTS gift_intents (
+      id BIGSERIAL PRIMARY KEY,
+      gift_id TEXT NOT NULL UNIQUE,
+      donor_wallet TEXT NOT NULL,
+      beneficiary_wallet TEXT NOT NULL,
+      amount_usdc NUMERIC(18, 6) NOT NULL,
+      gift_message TEXT,
+      tx_hash TEXT,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gift_intents_status
+      ON gift_intents (status);
+
+    CREATE INDEX IF NOT EXISTS idx_gift_intents_donor
+      ON gift_intents (LOWER(donor_wallet));
+
+    CREATE INDEX IF NOT EXISTS idx_gift_intents_tx
+      ON gift_intents (LOWER(tx_hash));
+
+    -- Bridge URANUS → ROG (idempotenza event_key)
+    CREATE TABLE IF NOT EXISTS uranus_bridge_events (
+      id BIGSERIAL PRIMARY KEY,
+      event_key TEXT NOT NULL UNIQUE,
+      source TEXT NOT NULL DEFAULT 'URANUS_L3',
+      tx_hash TEXT,
+      wallet_origine TEXT,
+      wallet_beneficiario TEXT NOT NULL,
+      wallet_cassa TEXT NOT NULL,
+      importo_ricevuto NUMERIC(18, 6),
+      importo_utilizzato NUMERIC(18, 6),
+      posizioni_attese INTEGER,
+      donation_id TEXT,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      posizioni JSONB,
+      error TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_uranus_bridge_status
+      ON uranus_bridge_events (status);
+
+    CREATE INDEX IF NOT EXISTS idx_uranus_bridge_wallet
+      ON uranus_bridge_events (LOWER(wallet_beneficiario));
+
+    -- INDICI PERFORMANCE per query area personale (user-positions, user-invitati)
+    -- Questi indici sono CRITICI per evitare rallentamenti di 10+ minuti
+    CREATE INDEX IF NOT EXISTS idx_wallet_positions_wallet
+      ON wallet_positions (wallet);
+    
+    CREATE INDEX IF NOT EXISTS idx_wallet_positions_posizione
+      ON wallet_positions (posizione);
+    
+    CREATE INDEX IF NOT EXISTS idx_anagrafica_invitati_invitante
+      ON anagrafica_invitati (invitante_wallet);
+    
+    CREATE INDEX IF NOT EXISTS idx_anagrafica_invitati_pos
+      ON anagrafica_invitati (invitato_pos);
+  `;
+
+  await query(coreSql);
+  isSchemaEnsured = true;
+}
+
+async function initDatabase() {
+  if (isInitialized) return;
+
+  try {
+    const pg = createPool();
+
+    // Test connessione
+    const client = await pg.connect();
+    const result = await client.query('SELECT NOW()');
+    client.release();
+
+    console.log('✅ PostgreSQL connesso:', result.rows[0].now);
+
+    // Ensure schema (idempotente)
+    await ensureCoreSchema();
+
+    isInitialized = true;
+
+  } catch (error) {
+    console.error('❌ Errore connessione PostgreSQL:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Ottiene pool PostgreSQL (crea se non esiste)
+ * @returns {Pool}
+ */
 function getPool() {
   if (!pool) {
-    pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      max: Number(process.env.PG_POOL_MAX) || 80,  // connessioni pool — tunabile via env senza toccare il codice
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000, // 10s timeout connessione
-      statement_timeout: 30000,      // 30s timeout query
-      keepAlive: true,               // mantiene vive le connessioni (evita drop dietro proxy/NAT)
-    });
-
-    pool.on('error', (err) => {
-      console.error('❌ Errore imprevisto pool PostgreSQL:', err.message);
-    });
+    createPool();
   }
   return pool;
 }
 
-async function query(sql, params = []) {
-  // Dentro una transazione (vedi `transaction`) usa il client dedicato, altrimenti il pool.
-  const runner = currentTxClient() || getPool();
-  const res = await runner.query(sql, params);
-  return res;
-}
+/**
+ * Esegue query con gestione errori
+ * @param {string} text - Query SQL
+ * @param {Array} params - Parametri query
+ * @returns {Promise<Object>} Risultato query
+ */
+async function query(text, params = []) {
+  const start = Date.now();
 
-async function queryOne(sql, params = []) {
-  const res = await query(sql, params);
-  return res.rows[0] || null;
-}
+  // Retry semplice per errori transienti del pool
+  const maxAttempts = parseInt(process.env.PG_QUERY_RETRIES || '2', 10);
 
-async function queryMany(sql, params = []) {
-  const res = await query(sql, params);
-  return res.rows;
-}
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const pg = getPool();
 
-async function getClient() {
-  return await getPool().connect();
-}
+    try {
+      const result = await pg.query(text, params);
+      const duration = Date.now() - start;
 
-async function testConnection() {
-  try {
-    const res = await queryOne('SELECT NOW() AS now');
-    console.log('✅ PostgreSQL connesso:', res.now);
-    return true;
-  } catch (e) {
-    console.error('❌ PostgreSQL non raggiungibile:', e.message);
-    return false;
+      if (duration > 1000) {
+        console.warn(`⚠️  Query lenta (${duration}ms):`, text.substring(0, 100));
+      }
+
+      return result;
+    } catch (error) {
+      const msg = (error && error.message) || '';
+      const transient = msg.includes('Connection terminated unexpectedly') || msg.includes('ECONNRESET') || msg.includes('terminating connection') || msg.includes('server closed the connection');
+
+      console.error(`❌ Query error (attempt ${attempt}/${maxAttempts}):`, msg);
+
+      if (transient && attempt < maxAttempts) {
+        // Reset pool e riprova
+        try {
+          await closePool();
+        } catch (_) {
+          // ignore
+        }
+        await new Promise(r => setTimeout(r, 300 * attempt));
+        continue;
+      }
+
+      console.error('   Query:', text);
+      console.error('   Params:', params);
+      throw error;
+    }
   }
 }
 
-async function close() {
+/**
+ * Ottiene client dal pool (per transazioni)
+ * @returns {Promise<PoolClient>}
+ */
+async function getClient() {
+  const pg = getPool();
+  return await pg.connect();
+}
+
+/**
+ * Chiude pool (graceful shutdown)
+ */
+async function closePool() {
   if (pool) {
     await pool.end();
     pool = null;
+    isInitialized = false;
+    console.log('✅ PostgreSQL pool chiuso');
   }
 }
 
-// Esegue `fn` dentro una transazione DB: tutte le query eseguite tramite questo
-// modulo durante `fn` usano lo stesso client (BEGIN -> COMMIT, oppure ROLLBACK su errore).
-// Le transazioni annidate riusano il client corrente senza aprire un nuovo BEGIN.
-async function transaction(fn) {
-  if (currentTxClient()) {
-    return await fn();
-  }
-  const client = await getPool().connect();
+/**
+ * Helper per transazioni
+ * @param {Function} callback - Funzione da eseguire in transazione
+ * @returns {Promise<any>}
+ */
+async function transaction(callback) {
+  const client = await getClient();
+  
   try {
     await client.query('BEGIN');
-    const result = await txStorage.run({ client }, () => fn());
+    const result = await callback(client);
     await client.query('COMMIT');
     return result;
-  } catch (e) {
-    try { await client.query('ROLLBACK'); } catch (_) {}
-    throw e;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
   } finally {
     client.release();
   }
 }
 
-// Esegue `fn` dentro un SAVEPOINT (solo se siamo in una transazione): se `fn`
-// fallisce, annulla solo questo passo senza compromettere l'intera transazione.
-// Utile per operazioni best-effort (es. calcoli non critici).
-async function savepoint(fn) {
-  const client = currentTxClient();
-  if (!client) return await fn();
-  const name = 'sp_' + Math.random().toString(36).slice(2, 10);
-  await client.query(`SAVEPOINT ${name}`);
-  try {
-    const result = await fn();
-    await client.query(`RELEASE SAVEPOINT ${name}`);
-    return result;
-  } catch (e) {
-    try { await client.query(`ROLLBACK TO SAVEPOINT ${name}`); } catch (_) {}
-    throw e;
-  }
+/**
+ * Helper per query singola riga
+ * @param {string} text - Query SQL
+ * @param {Array} params - Parametri
+ * @returns {Promise<Object|null>}
+ */
+async function queryOne(text, params = []) {
+  const result = await query(text, params);
+  return result.rows.length > 0 ? result.rows[0] : null;
 }
 
+/**
+ * Helper per query multiple righe
+ * @param {string} text - Query SQL
+ * @param {Array} params - Parametri
+ * @returns {Promise<Array>}
+ */
+async function queryMany(text, params = []) {
+  const result = await query(text, params);
+  return result.rows;
+}
+
+/**
+ * Verifica se tabella esiste
+ * @param {string} tableName
+ * @returns {Promise<boolean>}
+ */
+async function tableExists(tableName) {
+  const result = await queryOne(`
+    SELECT EXISTS (
+      SELECT FROM information_schema.tables 
+      WHERE table_schema = 'public'
+      AND table_name = $1
+    )
+  `, [tableName]);
+  
+  return result.exists;
+}
+
+// ========================================
+// EXPORTS
+// ========================================
+
 module.exports = {
+  initDatabase,
+  ensureCoreSchema,
   getPool,
-  getClient,
   query,
   queryOne,
   queryMany,
+  getClient,
+  closePool,
   transaction,
-  savepoint,
-  testConnection,
-  close
+  tableExists
 };
