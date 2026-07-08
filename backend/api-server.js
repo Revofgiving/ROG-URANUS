@@ -25,6 +25,9 @@ const donationFlowManager = require('./donation-flow-manager');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+// Inizializza Express (prima di qualsiasi uso di app)
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 const ANAGRAFICA_POSIZIONI_FILE = path.join(__dirname, 'database', 'ROG_ANAGRAFICA_DEFINITIVA.txt');
 // ANAGRAFICA INVITATI rimossa - PostgreSQL (tabella anagrafica_invitati) è l'unica fonte di verità
@@ -319,9 +322,6 @@ function prometheusMiddleware(req, res, next) {
   next();
 }
 
-// Inizializza Express
-const app = express();
-const PORT = process.env.PORT || 3000;
 
 // Middleware CORS - usa whitelist di cors-config.js
 const { corsOptions } = require('./cors-config');

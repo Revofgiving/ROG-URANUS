@@ -26,39 +26,23 @@ let isSchemaEnsured = false;
 function createPool() {
   if (pool) return pool;
 
-  // Coolify fornisce DATABASE_URL automaticamente (host interno del progetto).
-  // SSL: di default TLS permissivo (il Postgres gestito su Coolify accetta TLS,
-  // come confermato in produzione); solo localhost senza TLS.
-  // Override esplicito con DATABASE_SSL / PGSSLMODE = require | disable.
-  function computeSslForUrl(connectionString) {
-    const mode = (process.env.PGSSLMODE || process.env.DATABASE_SSL || '').toLowerCase();
-    if (mode === 'disable') return false;
-    if (mode === 'require') return { rejectUnauthorized: false };
-
-    try {
-      const u = new URL(connectionString);
-      const host = (u.hostname || '').toLowerCase();
-
-      // Solo loopback locale senza TLS
-      if (host === 'localhost' || host === '127.0.0.1') {
-        return false;
-      }
-
-      // Ogni altro host (incl. host interno Coolify): TLS permissivo
-      return { rejectUnauthorized: false };
-    } catch (e) {
-      // Se non riusciamo a parsare, fallback: in produzione usa SSL
-      return process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false;
-    }
+  // SSL deve essere esplicitamente abilitato.
+  // Rispetta DB_SSL o PGSSLMODE (require/disable). Default: ssl disabilitato.
+  function computeSslFromEnv() {
+    const raw = (process.env.DB_SSL || process.env.PGSSLMODE || process.env.DATABASE_SSL || '').toLowerCase();
+    if (raw === 'require' || raw === 'true') return { rejectUnauthorized: false };
+    if (raw === 'disable' || raw === 'false') return false;
+    return false;
   }
 
   // 🔧 DATABASE_URL ha priorità: su Coolify è l'host interno del progetto ed è sempre corretto.
   const connectionString = process.env.DATABASE_URL || process.env.DATABASE_PUBLIC_URL;
 
+  const sslFromEnv = computeSslFromEnv();
   const config = connectionString
     ? {
         connectionString,
-        ssl: computeSslForUrl(connectionString)
+        ssl: sslFromEnv
       }
     : {
         host: process.env.PGHOST || 'localhost',
@@ -66,10 +50,8 @@ function createPool() {
         user: process.env.PGUSER || 'postgres',
         password: process.env.PGPASSWORD || '',
         database: process.env.PGDATABASE || 'rog_db',
-        // Se si usano variabili separate, assumiamo che sia networking interno; abilita SSL solo se forzato.
-        ssl: ((process.env.PGSSLMODE || '').toLowerCase() === 'require' || (process.env.DATABASE_SSL || '').toLowerCase() === 'require')
-          ? { rejectUnauthorized: false }
-          : false
+        // Se si usano variabili separate, abilita SSL solo se forzato.
+        ssl: sslFromEnv
       };
 
   pool = new Pool({
